@@ -1,7 +1,7 @@
 # Metadata proposal module: interface proposal
 
 Status: interface and first test seam approved. PLAN.md remains the behavior specification.
-The vinyl-numbering slice is implemented; the rest of this document describes
+The vinyl-numbering and genre slices are implemented; the rest of this document describes
 the intended module as later behaviors are added. See README.md for current scope.
 
 ## Decision
