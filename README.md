@@ -1,6 +1,6 @@
 # foobar-tagger
 
-A review-before-apply metadata and artwork project with a read-only FLAC preview.
+A review-before-apply metadata and artwork project with a FLAC review window and terminal preview.
 See [PLAN.md](PLAN.md) for the roadmap and [DESIGN.md](DESIGN.md) for the metadata
 proposal interface.
 
@@ -30,8 +30,29 @@ linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
 given inputs. Discogs search, automatic matching, reissue content comparison,
-artist credits, classification, non-vinyl numbering, artwork, and the editable
-review window are pending.
+artist credits, classification, non-vinyl numbering, and artwork are pending.
+
+## Review and apply metadata (PowerShell)
+
+From the repository root, with dependencies installed, open the Tkinter review
+with an optional release folder or list of selected FLACs.
+
+```powershell
+.\.venv\Scripts\python main.py --review
+.\.venv\Scripts\python main.py --review '.\Release' --accept-style Trance
+```
+
+Confirm the release grouping, paste a Discogs edition URL, and load the edition.
+Select each file in the left pane and choose its corresponding Discogs track.
+Use **Edit date** and **Edit styles** to update the release-wide values. The
+existing and proposed values appear side by side, with source evidence and
+unresolved issues below the table. The vinyl numbering rules use the chosen
+track positions and full tracklist.
+
+Use the checkboxes or Space to approve individual changes. Linked date and
+genre changes are selected together, and editing the inputs clears approvals.
+**Apply approved** asks for confirmation, displays each field's outcome, and
+refreshes the comparison. [Review window screenshot](docs/review-window.jpg)
 
 ## Preview one release (PowerShell)
 
@@ -81,10 +102,8 @@ The current writer uses FLAC Vorbis comments `DATE`, `RELEASE DATE`, `GENRE`,
 deletes their logical field. The mappings have been round-tripped with Mutagen
 on disposable FLACs. Checking them in foobar2000 remains pending.
 
-After an interruption, `find_staged_files(local)` lists temporary copies for
-inspection once the application has stopped. The writer API is ready for a
-review UI to request approval, display per-field outcomes, and refresh stale
-comparisons. The terminal preview remains read-only.
+After an interruption, the review window lists leftover temporary copies when
+the release is reopened. The terminal preview remains read-only.
 
 ## Development (PowerShell)
 

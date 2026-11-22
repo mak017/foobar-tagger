@@ -1,4 +1,4 @@
-"""Inspect one FLAC release and preview metadata proposals in the terminal."""
+"""Inspect one FLAC release in the terminal or open the metadata review window."""
 
 import argparse
 import os
@@ -40,7 +40,8 @@ def _show_values(values: tuple[str, ...] | None) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("paths", type=Path, nargs="+", help="one release folder or selected FLAC paths")
+    parser.add_argument("paths", type=Path, nargs="*", help="one release folder or selected FLAC paths")
+    parser.add_argument("--review", action="store_true", help="open the interactive Tkinter review window")
     parser.add_argument("--release-folder", type=Path, help="override the inferred root when selecting files")
     parser.add_argument("--confirm-release", action="store_true", help="confirm the proposed local release membership")
     parser.add_argument("--discogs-url", help="Discogs URL for the edition to review")
@@ -49,6 +50,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--accept-style", action="append", default=[], metavar="STYLE",
                         help="admit a Discogs style to this preview's vocabulary (repeatable)")
     args = parser.parse_args(argv)
+
+    if args.review:
+        if args.confirm_release or args.map:
+            parser.error("Confirm grouping and map files in the review window when using --review.")
+        from ui.app import run_review
+
+        return run_review(args.paths, args.release_folder, args.discogs_url or "", frozenset(args.accept_style))
+    if not args.paths:
+        parser.error("Supply a release folder or selected FLAC paths, or use --review.")
 
     try:
         local = inspect_release(args.paths, args.release_folder)

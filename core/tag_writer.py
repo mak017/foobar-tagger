@@ -67,9 +67,7 @@ def _validate_approval(
 
     groups: dict[str, frozenset[DecisionKey]] = {}
     for group in proposal.approval_groups:
-        members = group.linked_changes or tuple(
-            (file_id, group.field, group.target_values) for file_id in group.file_ids
-        )
+        members = group.changes
         keys = frozenset((file_id, field) for file_id, field, _ in members)
         if not keys.intersection(accepted):
             continue

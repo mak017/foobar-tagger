@@ -149,6 +149,12 @@ class ApprovalGroup:
     target_values: tuple[str, ...]
     linked_changes: tuple[tuple[str, str, tuple[str, ...] | None], ...] = ()
 
+    @property
+    def changes(self) -> tuple[tuple[str, str, tuple[str, ...] | None], ...]:
+        return self.linked_changes or tuple(
+            (file_id, self.field, self.target_values) for file_id in self.file_ids
+        )
+
 
 @dataclass(frozen=True)
 class MetadataProposal:
