@@ -14,6 +14,7 @@ from core.rules_engine import LocalFile
 
 
 FLAC_FIELDS = {
+    "%ARTIST%": ("ARTIST",),
     "%ALBUM%": ("ALBUM",),
     "%ALBUM ARTIST%": ("ALBUMARTIST", "ALBUM ARTIST"),
     "%TITLE%": ("TITLE",),

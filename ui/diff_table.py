@@ -125,8 +125,13 @@ class DiffTable(ttk.Frame):
             for issue in self.proposal.issues
             if decision.field in issue.fields and decision.file_id in issue.file_ids
         )
-        base = f"{decision.reason}\n{evidence.provider} · {evidence.release_id} · Source: {source}"
-        self.detail.set("\n".join((base, *dict.fromkeys(related))))
+        comparison = f"Existing: {_display(decision.existing_values)}"
+        if decision.state == "SET":
+            comparison += f" · Proposed: {_display(decision.proposed_values)}"
+        elif decision.state == "DELETE":
+            comparison += " · Proposed: Remove field"
+        self.detail.set("\n".join((comparison, decision.reason, f"{evidence.provider} · {evidence.release_id} · Source: {source}",
+                                   *dict.fromkeys(related))))
 
     def _toggle(self, item: str) -> None:
         decision = self.rows.get(item)

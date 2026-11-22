@@ -8,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib import request
 
+from core.artist_credits import ArtistCredit
 from core.rules_engine import DateSource, Edition, EditionTrack, GenreSource, ReleaseDates
 
 
@@ -203,6 +204,25 @@ def _release_images(entries: object) -> tuple[ReleaseImage, ...]:
     return tuple(sorted(images.values(), key=lambda image: not image.primary))
 
 
+def _artist_credits(entries: object) -> tuple[ArtistCredit, ...] | None:
+    if entries is None or entries == []:
+        return None
+    if not isinstance(entries, list):
+        return ()
+    artists: list[ArtistCredit] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return ()
+        name, credited_as, join, artist_id = (entry.get(key) for key in ("name", "anv", "join", "id"))
+        if (not isinstance(name, str) or not name.strip()
+                or (credited_as is not None and not isinstance(credited_as, str))
+                or (join is not None and not isinstance(join, str))):
+            return ()
+        artists.append(ArtistCredit(name, credited_as or "", join or "",
+                                    artist_id if type(artist_id) is int and artist_id > 0 else None))
+    return tuple(artists)
+
+
 def load_release(url: str) -> DiscogsRelease:
     parsed = urlsplit(url.strip())
     release_match = None
@@ -236,6 +256,7 @@ def load_release(url: str) -> DiscogsRelease:
         tracks.append(EditionTrack(
             str(index), position.strip() if isinstance(position, str) else "",
             track_title if isinstance(track_title, str) else "", _duration(entry.get("duration")),
+            artist_credits=_artist_credits(entry.get("artists")),
         ))
 
     formats = data.get("formats")
@@ -254,6 +275,7 @@ def load_release(url: str) -> DiscogsRelease:
     edition = Edition(
         "discogs", release_id, _media_type(formats), tuple(tracks), complete and bool(tracks),
         genre_sources=genre_sources, dates=ReleaseDates(edition_date=date_source),
+        release_title=title, artist_credits=_artist_credits(data.get("artists")),
     )
     return DiscogsRelease(title, edition, _release_images(data.get("images")))
 

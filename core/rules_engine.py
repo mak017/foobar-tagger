@@ -6,6 +6,8 @@ from types import MappingProxyType
 from typing import Mapping
 import re
 
+from core.artist_credits import ArtistCredit, RenderedCredit, credit_source, credits_differ, is_various, render_artist_credit
+
 
 class InvalidProposalInput(ValueError):
     """The context contains inconsistent file or edition identities."""
@@ -33,6 +35,11 @@ class EditionTrack:
     position: str
     title: str = ""
     duration_seconds: int | None = None
+    artist_credits: tuple[ArtistCredit, ...] | None = None
+
+    def __post_init__(self):
+        if self.artist_credits is not None:
+            object.__setattr__(self, "artist_credits", tuple(self.artist_credits))
 
 
 @dataclass(frozen=True)
@@ -74,11 +81,15 @@ class Edition:
     tracklist_complete: bool
     genre_sources: tuple[GenreSource, ...] | None = None
     dates: ReleaseDates | None = None
+    release_title: str | None = None
+    artist_credits: tuple[ArtistCredit, ...] | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "tracks", tuple(self.tracks))
         if self.genre_sources is not None:
             object.__setattr__(self, "genre_sources", tuple(self.genre_sources))
+        if self.artist_credits is not None:
+            object.__setattr__(self, "artist_credits", tuple(self.artist_credits))
 
 
 @dataclass(frozen=True)
@@ -166,6 +177,87 @@ class MetadataProposal:
     approval_groups: tuple[ApprovalGroup, ...] = ()
 
 
+@dataclass(frozen=True)
+class _CreditValue:
+    values: tuple[str, ...] | None
+    source: str | tuple[str, ...] | None
+    reason: str
+    unresolved: bool = False
+
+
+def _credited_text(source: str | None, reason: str, missing: str) -> _CreditValue:
+    value = " ".join((source or "").split())
+    return _CreditValue((value,), source, reason) if value else _CreditValue(None, source, missing, True)
+
+
+def _album_artist(
+    edition: Edition, artists: dict[str, RenderedCredit | None], artist_sources: dict[str, tuple[str, ...] | None],
+) -> _CreditValue:
+    release_source = credit_source(edition.artist_credits)
+    known = tuple(artist for artist in artists.values() if artist is not None)
+    if not edition.tracklist_complete or not edition.tracks:
+        return _CreditValue(None, release_source, "Album artist needs the complete edition tracklist.", True)
+    if not credits_differ(known):
+        if len(known) != len(edition.tracks):
+            return _CreditValue(None, release_source, "Some track artists are missing. The available credits do not establish album artist.", True)
+        return _CreditValue(None, artist_sources[edition.tracks[0].track_id],
+                            "All tracks in the complete edition have the same artist credit. Remove the album artist.")
+    if edition.artist_credits and len(edition.artist_credits) == 1 and is_various(edition.artist_credits[0], edition.provider):
+        return _CreditValue(("Various",), release_source, "Track credits differ and the edition is credited to Various.")
+    release_credit = render_artist_credit(edition.artist_credits, edition.provider)
+    if release_credit is None:
+        return _CreditValue(None, release_source, "Track credits differ. The main release artist credit is missing or unresolved.", True)
+    return _CreditValue(release_credit.values, release_source,
+                        "Track credits differ. Use the main artist credit for the selected edition.")
+
+
+def _propose_credited_fields(
+    context: ReleaseContext, decisions: list[FieldDecision], issues: list[ReviewIssue],
+) -> None:
+    edition = context.edition
+    tracks = {track.track_id: track for track in edition.tracks}
+    inherit = (edition.provider == "discogs" and edition.tracklist_complete
+               and all(track.artist_credits is None for track in edition.tracks))
+    raw_credits = {track.track_id: edition.artist_credits if inherit else track.artist_credits for track in edition.tracks}
+    artists = {key: render_artist_credit(credit, edition.provider) for key, credit in raw_credits.items()}
+    sources = {key: credit_source(credit) for key, credit in raw_credits.items()}
+    album = _credited_text(edition.release_title, "Use the title of the matched edition.", "The edition title is unavailable.")
+    album_artist = _album_artist(edition, artists, sources)
+    unmapped = _CreditValue(None, None, "Confirm a track mapping before changing these fields.", True)
+    for file in context.files:
+        if file.file_id not in context.selected_file_ids:
+            continue
+        mapped_id = context.track_mapping.get(file.file_id)
+        if mapped_id is None:
+            fields = (("%ARTIST%", unmapped), ("%TITLE%", unmapped),
+                      ("%ALBUM%", unmapped), ("%ALBUM ARTIST%", unmapped))
+            issues.append(ReviewIssue("CREDIT_MAPPING_REQUIRED", unmapped.reason, (file.file_id,),
+                                      tuple(field for field, _ in fields), ("manual_mapping", "skip")))
+        else:
+            artist = artists[mapped_id]
+            if artist is None:
+                reason = "The main artist credit for the matched track is missing or unresolved."
+            elif inherit:
+                reason = "Use the Discogs release artist credit. The edition supplies no separate track artist credits."
+            else:
+                reason = "Use the matched track's credited names and collaborators."
+            artist_value = _CreditValue(artist.values if artist else None, sources[mapped_id], reason, artist is None)
+            title = _credited_text(tracks[mapped_id].title, "Use the matched recording's full credited title.",
+                                   "The matched track title is unavailable.")
+            fields = (("%ARTIST%", artist_value), ("%TITLE%", title), ("%ALBUM%", album), ("%ALBUM ARTIST%", album_artist))
+        for field, value in fields:
+            existing = file.tags.get(field)
+            if value.unresolved:
+                state = "UNRESOLVED"
+                if mapped_id is not None:
+                    issues.append(ReviewIssue("CREDIT_EVIDENCE_REQUIRED", value.reason, (file.file_id,),
+                                              (field,), ("review_edition", "skip")))
+            else:
+                state = "KEEP" if existing == value.values else "DELETE" if value.values is None else "SET"
+            decisions.append(FieldDecision(file.file_id, field, existing, value.values, state,
+                                           Evidence(edition.provider, edition.release_id, value.source), value.reason))
+
+
 def _valid_release_date(value: object) -> bool:
     if not isinstance(value, str):
         return False
@@ -208,6 +300,10 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
     issues: list[ReviewIssue] = []
     evaluated_rules: list[str] = []
     approval_groups: list[ApprovalGroup] = []
+    if (edition.release_title is not None or edition.artist_credits is not None
+            or any(track.title or track.artist_credits is not None for track in edition.tracks)):
+        evaluated_rules.append("credited_metadata")
+        _propose_credited_fields(context, decisions, issues)
     if edition.dates is not None or context.manual_date is not None:
         evaluated_rules.append("release_dates")
         dates = edition.dates or ReleaseDates()

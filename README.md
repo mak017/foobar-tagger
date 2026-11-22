@@ -13,7 +13,7 @@ show the tracklist, accept explicit mappings, and print a read-only proposal wit
 existing values, proposed changes, source evidence, and unresolved fields.
 
 The pure `core.rules_engine.propose_metadata(context, policy)` function implements
-vinyl/LP numbering, release-wide genres, and release-wide dates. Vinyl supports continuous release numbering,
+credited metadata, vinyl/LP numbering, release-wide genres, and release-wide dates. Vinyl supports continuous release numbering,
 full-release totals, separate side/within-side values, explicit disc-tag deletion,
 unchanged values, partial selections, unresolved mappings/positions, incomplete
 tracklists, and structural identity validation. Decisions include source evidence
@@ -29,8 +29,8 @@ vocabulary validation and selection consistency. Genre changes are returned in
 linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
-given inputs. Reissue content comparison, artist credits, classification, and
-non-vinyl numbering are pending. The artwork
+given inputs. Reissue content comparison, classification, and non-vinyl
+numbering are pending. The artwork
 window previews covers and applies separately approved folder or embedded artwork.
 
 ## Review and apply metadata (PowerShell)
@@ -61,6 +61,15 @@ Duration differences of at most five seconds can support a suggestion. Larger
 differences, conflicting versions or positions, duplicate claims, and incomplete
 tracklists are left for manual review. Changing editions clears the mappings and
 approvals. [Track mapping screenshot](docs/track-mapping.jpg)
+
+Mapped tracks receive Artist, Title, and Album proposals from the selected
+Discogs edition. Artist credits preserve printed name variants and joins, and
+track titles keep their mix or version subtitles. Album Artist uses the full
+edition even when you select one file. Identical credits on every track propose
+an explicit deletion. Differing known credits use the main release artist or
+exactly `Various` for a various-artists edition. Missing track credits remain
+unresolved when the source supplies separate track artists. [Artist guidelines](https://support.discogs.com/hc/en-us/articles/360005054753-Database-Guidelines-2-Artist) [Tracklisting guidelines](https://support.discogs.com/hc/en-us/articles/360005055373-Database-Guidelines-12-Tracklisting) [Credit review screenshot](docs/credited-metadata.jpg)
+
 Use **Edit date** and **Edit styles** to update the release-wide values. The
 existing and proposed values appear side by side, with source evidence and
 unresolved issues below the table. The vinyl numbering rules use the chosen
@@ -144,10 +153,11 @@ reopens and verifies the FLAC, checks the original's file state again, then
 replaces it. Results report individual changed, failed, and skipped fields and
 flag release-wide inconsistencies after partial application.
 
-The current writer uses FLAC Vorbis comments `DATE`, `RELEASE DATE`, `GENRE`,
-`TRACKNUMBER`, `TOTALTRACKS`, `DISCNUMBER`, `TOTALDISCS`, `VINYLSIDE`, and
-`VINYLTRACKNUMBER` for the implemented rules. It recognizes `TRACKTOTAL` and
-`DISCTOTAL` as aliases and removes them when an approved change replaces or
+The current writer uses FLAC Vorbis comments `ARTIST`, `TITLE`, `ALBUM`,
+`ALBUMARTIST`, `DATE`, `RELEASE DATE`, `GENRE`, `TRACKNUMBER`, `TOTALTRACKS`,
+`DISCNUMBER`, `TOTALDISCS`, `VINYLSIDE`, and `VINYLTRACKNUMBER` for the
+implemented rules. It recognizes `ALBUM ARTIST`, `TRACKTOTAL`, and `DISCTOTAL`
+as aliases and removes them when an approved change replaces or
 deletes their logical field. The mappings have been round-tripped with Mutagen
 on disposable FLACs. Checking them in foobar2000 remains pending.
 
