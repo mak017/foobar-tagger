@@ -30,7 +30,8 @@ linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
 given inputs. Discogs search, automatic matching, reissue content comparison,
-artist credits, classification, non-vinyl numbering, and artwork are pending.
+artist credits, classification, and non-vinyl numbering are pending. The artwork
+window previews existing and proposed covers. Saving and embedding artwork are pending.
 
 ## Review and apply metadata (PowerShell)
 
@@ -53,6 +54,25 @@ Use the checkboxes or Space to approve individual changes. Linked date and
 genre changes are selected together, and editing the inputs clears approvals.
 **Apply approved** asks for confirmation, displays each field's outcome, and
 refreshes the comparison. [Review window screenshot](docs/review-window.jpg)
+
+## Preview artwork
+
+Choose **Artwork** in the review window to inspect images in the release folder
+and pictures embedded in selected FLACs. Load the Discogs edition to compare its
+primary and secondary images, or open a local candidate as an unverified
+alternative. Discogs credentials are optional. If needed, supply a personal token
+through the `DISCOGS_TOKEN` environment variable.
+
+The preview shows decoded dimensions, encoded bytes, and the prospective
+`cover.png` or `cover.jpg` name. Candidates must be at least 1000 pixels on both
+axes and strictly under 5,000,000 bytes after encoding. The converter preserves
+aspect ratio and never upscales. Existing artwork stays unverified until its
+edition identity is established. The window leaves cover files and FLACs untouched.
+[Artwork review screenshot](docs/artwork-review.jpg)
+
+This application uses the Discogs API independently of Discogs, with no
+affiliation, sponsorship, or endorsement. Discogs is a trademark of Zink Media,
+LLC. [Discogs API terms](https://support.discogs.com/hc/en-us/articles/360009334593-API-Terms-of-Use)
 
 ## Preview one release (PowerShell)
 
@@ -107,9 +127,9 @@ the release is reopened. The terminal preview remains read-only.
 
 ## Development (PowerShell)
 
-Developed and tested with Python 3.13.7. The FLAC reader uses Mutagen, and the
-development requirements also install Pyright for static type checking. Node.js
-must be available, or the Python wrapper may download it.
+Developed and tested with Python 3.13.7. The FLAC reader uses Mutagen and artwork
+uses Pillow. The development requirements also install Pyright for static type
+checking. Node.js must be available, or the Python wrapper may download it.
 
 ```powershell
 python -m venv .venv

@@ -14,6 +14,7 @@ from core.flac_input import LocalRelease, inspect_release
 from core.rules_engine import ManualDate, MetadataPolicy, ReleaseContext, propose_metadata
 from core.tag_writer import ApplyResult, apply_metadata, find_staged_files
 from providers.discogs import DiscogsRelease, load_release
+from ui.artwork_panel import ArtworkWindow
 from ui.diff_table import DiffTable
 from ui.theme import BACKGROUND, INPUT, TEXT, apply_theme
 
@@ -26,6 +27,7 @@ class ReviewWindow:
         self.root = root
         self.local: LocalRelease | None = None
         self.release: DiscogsRelease | None = None
+        self.artwork_window: ArtworkWindow | None = None
         self.mapping: dict[str, str] = {}
         self.manual_date: ManualDate | None = None
         self.manual_styles: tuple[str, ...] | None = None
@@ -131,8 +133,10 @@ class ReviewWindow:
         review_bar = ttk.Frame(review, style="Panel.TFrame")
         review_bar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(review_bar, text="Metadata changes", style="Section.TLabel").pack(side="left")
+        self.artwork_button = ttk.Button(review_bar, text="Artwork…", command=self._open_artwork)
+        self.artwork_button.pack(side="right")
         self.styles_button = ttk.Button(review_bar, text="Edit styles…", command=self._edit_styles)
-        self.styles_button.pack(side="right")
+        self.styles_button.pack(side="right", padx=(0, 6))
         self.date_button = ttk.Button(review_bar, text="Edit date…", command=self._edit_date)
         self.date_button.pack(side="right", padx=(0, 6))
         self.diff = DiffTable(review)
@@ -185,7 +189,7 @@ class ReviewWindow:
             (self.url_entry, not self.busy), (self.load_button, grouped and bool(self.url.get().strip())),
             (self.confirm_button, local), (self.refresh_button, local_available),
             (self.toggle_file_button, local and bool(self.file_tree.selection())),
-            (self.styles_button, editing), (self.date_button, editing),
+            (self.artwork_button, local), (self.styles_button, editing), (self.date_button, editing),
             (self.approve_button, editing and bool(approval and approval.decisions)),
             (self.clear_button, editing and bool(approved)), (self.apply_button, editing and bool(approved)),
         ):
@@ -219,8 +223,17 @@ class ReviewWindow:
         if self.writing:
             self.status.set("Wait for the current write to finish before closing.")
             return
+        if self.artwork_window is not None and self.artwork_window.window.winfo_exists():
+            self.artwork_window.close()
         self.pool.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
+
+    def _open_artwork(self) -> None:
+        if self.busy or self.needs_refresh or self.local is None:
+            return
+        if self.artwork_window is not None and self.artwork_window.window.winfo_exists():
+            self.artwork_window.close()
+        self.artwork_window = ArtworkWindow(self.root, self.local, self.release if self.confirmed.get() else None)
 
     def open_paths(self, paths: list[Path], release_folder: Path | None = None) -> None:
         def opened(local: LocalRelease) -> None:
