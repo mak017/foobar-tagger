@@ -5,18 +5,20 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import TypeVar
 import webbrowser
 
 from PIL import Image, ImageTk
 
 from core.cover_engine import (
-    ArtworkError, ArtworkInfo, ExistingArtwork, cover_paths, existing_artwork, prepare_cover, preview_image,
+    ArtworkError, ArtworkInfo, ExistingArtwork, existing_artwork, prepare_cover, preview_image,
 )
+from core.cover_writer import ArtworkReview, apply_artwork, review_artwork
 from core.flac_input import LocalRelease
+from core.tag_writer import ApplyResult
 from providers.discogs import DiscogsRelease, download_image
-from ui.theme import BACKGROUND
+from ui.theme import BACKGROUND, INPUT, TEXT
 
 
 T = TypeVar("T")
@@ -31,6 +33,7 @@ class Preview:
     image: Image.Image
     summary: str
     note: str
+    review: ArtworkReview | None = None
 
 
 class PreviewPane(ttk.Frame):
@@ -64,20 +67,30 @@ class PreviewPane(ttk.Frame):
 
 
 class ArtworkWindow:
-    def __init__(self, parent: tk.Tk, local: LocalRelease, release: DiscogsRelease | None) -> None:
+    def __init__(
+        self, parent: tk.Tk, local: LocalRelease, release: DiscogsRelease | None,
+        *, can_apply: Callable[[], bool], on_state_change: Callable[[], None], refresh_flacs: Callable[[], None],
+    ) -> None:
         self.local = local
         self.release = release
+        self.can_apply = can_apply
+        self.on_state_change = on_state_change
+        self.refresh_flacs = refresh_flacs
+        self.review: ArtworkReview | None = None
+        self.writing = False
         self.sources: tuple[ExistingArtwork, ...] = ()
         self.existing_warnings: tuple[str, ...] = ()
         self.pool = ThreadPoolExecutor(max_workers=2)
         self.pending: dict[object, str] = {}
         self.window = tk.Toplevel(parent, background=BACKGROUND)
         self.window.title("foobar-tagger · Artwork review")
-        self.window.geometry("890x670")
-        self.window.minsize(750, 570)
+        self.window.geometry("900x795")
+        self.window.minsize(790, 670)
         self.window.transient(parent)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Escape>", lambda _event: self.close())
+        self.save_folder = tk.BooleanVar(master=self.window)
+        self.embed = tk.BooleanVar(master=self.window)
 
         body = ttk.Frame(self.window, padding=(18, 14))
         body.pack(fill="both", expand=True)
@@ -94,9 +107,28 @@ class ArtworkWindow:
         self.candidate.grid(row=2, column=1, padx=(5, 0), sticky="nsew")
         self.candidate.choice.bind("<<ComboboxSelected>>", lambda _event: self._show_discogs())
 
+        plan_box = ttk.Frame(body)
+        plan_box.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        plan_box.columnconfigure(0, weight=1)
+        self.plan = tk.Text(plan_box, height=5, wrap="word", font=("Segoe UI", 10), background=INPUT,
+                            foreground=TEXT, borderwidth=0, padx=8, pady=5, takefocus=True, state="disabled")
+        self.plan.grid(row=0, column=0, sticky="ew")
+        yscroll = ttk.Scrollbar(plan_box, orient="vertical", command=self.plan.yview)
+        yscroll.grid(row=0, column=1, sticky="ns")
+        self.plan.configure(yscrollcommand=yscroll.set)
+        choices = ttk.Frame(body)
+        choices.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.folder_button = ttk.Checkbutton(choices, text="Save folder cover", variable=self.save_folder,
+                                             command=self._update_plan)
+        self.folder_button.pack(side="left")
+        self.embed_button = ttk.Checkbutton(choices, text="Embed in selected FLACs", variable=self.embed,
+                                            command=self._update_plan)
+        self.embed_button.pack(side="left", padx=(14, 0))
+        self.apply_button = ttk.Button(choices, text="Apply approved artwork…", style="Apply.TButton", command=self._apply)
+        self.apply_button.pack(side="right")
+
         footer = ttk.Frame(body)
-        footer.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        ttk.Label(footer, text="Preview only", style="Muted.TLabel").pack(side="left")
+        footer.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(footer, text="Close", command=self.close).pack(side="right")
         self.open_button = ttk.Button(footer, text="Open local candidate…", command=self._choose_file)
         self.open_button.pack(side="right", padx=(0, 6))
@@ -116,6 +148,7 @@ class ArtworkWindow:
         else:
             self.candidate.clear("This edition has no available Discogs images." if release is not None else
                                  "Load an edition in the main review to see its Discogs images.")
+        self._update_plan()
 
     def _run(self, task: Callable[[], T], done: Callable[[T], None], error: Callable[[str], None]) -> None:
         future = self.pool.submit(task)
@@ -136,6 +169,9 @@ class ArtworkWindow:
         self.pending[key] = self.window.after(45, poll)
 
     def close(self) -> None:
+        if self.writing:
+            self._show_plan("Wait for the current artwork write to finish before closing.")
+            return
         for timer in self.pending.values():
             self.window.after_cancel(timer)
         self.pending.clear()
@@ -195,6 +231,12 @@ class ArtworkWindow:
             self._show_candidate(path.read_bytes, f"Local alternative · {path.name} · Edition identity unverified")
 
     def _show_candidate(self, read: Callable[[], bytes], identity: str) -> None:
+        if self.writing:
+            return
+        self.review = None
+        self.save_folder.set(False)
+        self.embed.set(False)
+        self._update_plan()
         self.open_button.state(("disabled",))
         self.retry_button.state(("disabled",))
         self.candidate.choice.configure(state="disabled")
@@ -207,14 +249,9 @@ class ArtworkWindow:
             except ArtworkError as exc:
                 info, image = preview_image(data)
                 return Preview(image, _dimensions(info), f"{identity}\nUnresolved · {exc}")
-            target, present = cover_paths(self.local.root, cover)
-            primary = next((path.name for path in present if path.name.casefold() == target.name.casefold()), None)
-            alternate = tuple(path.name for path in present if path.name.casefold() != target.name.casefold())
-            target_info = f"Existing target: {primary}" if primary else f"New target: {target.name}"
-            if alternate:
-                target_info += " · Other cover files: " + ", ".join(alternate)
+            review = review_artwork(self.local, cover)
             _, image = preview_image(cover.data)
-            return Preview(image, _dimensions(cover.info), f"{identity}\n{cover.change} · {target_info}")
+            return Preview(image, _dimensions(cover.info), f"{identity}\n{cover.change}", review)
 
         def ready() -> None:
             self.open_button.state(("!disabled",))
@@ -224,6 +261,8 @@ class ArtworkWindow:
 
         def done(preview: Preview) -> None:
             self.candidate.show(preview)
+            self.review = preview.review
+            self._update_plan()
             ready()
 
         def error(message: str) -> None:
@@ -231,3 +270,98 @@ class ArtworkWindow:
             ready()
 
         self._run(work, done, error)
+
+    def update_controls(self) -> None:
+        review = self.review
+        ready = review is not None and not self.writing and self.can_apply()
+        folder_ready = ready and review is not None and review.folder is not None
+        embed_ready = ready and bool(self.local.selected_file_ids)
+        for control, enabled in (
+            (self.folder_button, folder_ready), (self.embed_button, embed_ready),
+            (self.apply_button, (folder_ready and self.save_folder.get()) or (embed_ready and self.embed.get())),
+        ):
+            control.state(("!disabled" if enabled else "disabled",))
+
+    def _show_plan(self, message: str) -> None:
+        self.plan.configure(state="normal")
+        self.plan.delete("1.0", "end")
+        self.plan.insert("1.0", message)
+        self.plan.configure(state="disabled")
+
+    def _update_plan(self) -> None:
+        review = self.review
+        if review is None:
+            self._show_plan("Select a qualifying candidate to review the affected files.")
+        else:
+            lines: list[str] = []
+            if review.folder is not None:
+                action = "Replace" if review.folder.replaces_target else "Save"
+                lines.append(f"Folder cover · {action} {review.folder.target}")
+                lines.extend(f"  Remove {path}" for path, _ in review.folder.removals)
+            else:
+                lines.append(f"Folder cover unavailable · {review.folder_issue}")
+            if self.local.selected_file_ids:
+                lines.append("Embed front cover · Add or replace the front cover in:")
+                lines.extend(f"  {self.local.root / file_id}" for file_id in sorted(self.local.selected_file_ids))
+            if not self.can_apply():
+                lines.insert(0, "Confirm this grouping in the main review before applying. Reopen Artwork after changing its scope.")
+            self._show_plan("\n".join(lines))
+        self.update_controls()
+
+    def _apply(self) -> None:
+        review = self.review
+        if review is None or self.writing or not self.can_apply():
+            self._update_plan()
+            return
+        folder = self.save_folder.get() and review.folder is not None
+        embed = self.embed.get() and bool(self.local.selected_file_ids)
+        if not folder and not embed:
+            return
+        actions = []
+        if folder and review.folder is not None:
+            actions.append(f"Save {review.folder.target.name} in the release folder.")
+            if review.folder.removals:
+                actions.append(f"Remove {len(review.folder.removals)} listed alternate cover file(s).")
+        if embed:
+            actions.append(f"Embed the front cover in {len(self.local.selected_file_ids)} selected FLAC file(s).")
+        message = "\n".join(actions) + "\n\nConfirm that this artwork matches your edition."
+        if not messagebox.askyesno("Apply approved artwork", message, default="no", parent=self.window):
+            return
+        if not self.can_apply():
+            self._update_plan()
+            return
+
+        self.writing = True
+        self.review = None
+        self.save_folder.set(False)
+        self.embed.set(False)
+        self.open_button.state(("disabled",))
+        self.retry_button.state(("disabled",))
+        self.candidate.choice.configure(state="disabled")
+        self._show_plan("Verifying and applying approved artwork…")
+        self.update_controls()
+        self.on_state_change()
+
+        def finished() -> None:
+            self.writing = False
+            self.open_button.state(("!disabled",))
+            if self.release is not None and self.release.images:
+                self.retry_button.state(("!disabled",))
+                self.candidate.choice.configure(state="readonly")
+            self.update_controls()
+            if embed:
+                self.refresh_flacs()
+            else:
+                self.on_state_change()
+
+        def done(result: ApplyResult) -> None:
+            lines = [f"{field.status.title()} · {field.field} · {field.file_id}\n  {field.reason}" for field in result.fields]
+            self._show_plan("\n".join((*lines, *result.warnings)))
+            finished()
+            self._run(lambda: existing_artwork(self.local), self._list_existing, self.current.clear)
+
+        def error(message: str) -> None:
+            self._show_plan(message)
+            finished()
+
+        self._run(lambda: apply_artwork(review, save_folder=folder, embed=embed), done, error)

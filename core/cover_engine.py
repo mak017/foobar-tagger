@@ -13,8 +13,10 @@ from core.flac_input import LocalRelease
 
 MIN_COVER_DIMENSION = 1000
 MAX_COVER_BYTES = 5_000_000
+FRONT_COVER_TYPE = 3
 IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "AVIF")
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif"})
+FOLDER_COVER_NAMES = frozenset({"cover", "folder", "front"})
 
 
 class ArtworkError(ValueError):
@@ -73,7 +75,7 @@ def existing_artwork(local: LocalRelease) -> tuple[tuple[ExistingArtwork, ...], 
             warnings.append(f"Could not inspect embedded artwork in {file_id}: {exc}")
             continue
         for index, picture in enumerate(pictures):
-            kind = "front cover" if picture.type == 3 else "image"
+            kind = "front cover" if picture.type == FRONT_COVER_TYPE else "image"
             sources.append(ExistingArtwork(f"Embedded · {file_id} · {kind} {index + 1}", path, index))
     return tuple(sources), tuple(warnings)
 
@@ -112,8 +114,15 @@ def cover_paths(root: Path, cover: PreparedCover) -> tuple[Path, tuple[Path, ...
     """Identify the output path and existing cover-name files in the release folder."""
     destination = root / cover.filename
     existing = tuple(path for path in sorted(root.iterdir())
-                     if path.stem.lower() == "cover" and path.suffix.lower() in IMAGE_SUFFIXES and path.is_file())
+                     if path.stem.lower() in FOLDER_COVER_NAMES and path.suffix.lower() in IMAGE_SUFFIXES)
     return destination, existing
+
+
+def validate_prepared_cover(cover: PreparedCover) -> None:
+    actual = inspect_artwork(cover.data)
+    filename = "cover.png" if actual.format == "PNG" else "cover.jpg"
+    if not actual.meets_output_requirements or actual != cover.info or cover.filename != filename:
+        raise ArtworkError("The approved cover bytes do not match the reviewed image and output requirements.")
 
 
 def _encode(image: Image.Image, format_name: str) -> bytes:

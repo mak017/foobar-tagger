@@ -11,9 +11,10 @@ from threading import Lock
 from typing import Literal
 
 from mutagen import MutagenError
-from mutagen.flac import FLAC, VCFLACDict
+from mutagen.flac import FLAC, Picture, VCFLACDict
 
-from core.flac_input import FLAC_FIELDS, LocalRelease, file_state, inspect_release
+from core.cover_engine import FRONT_COVER_TYPE, PreparedCover, validate_prepared_cover
+from core.flac_input import FLAC_FIELDS, LocalRelease, directory_identity, file_state, inspect_release
 from core.rules_engine import FieldDecision, MetadataProposal
 
 
@@ -21,6 +22,7 @@ DecisionKey = tuple[str, str]
 RELEASE_FIELDS = {"%DATE%": ("%DATE%", "%RELEASE DATE%"), "%GENRE%": ("%GENRE%",)}
 STAGING_PREFIX = ".foobar-tagger-"
 STAGING_SUFFIX = ".flac.tmp"
+COVER_STAGING_SUFFIX = ".cover.tmp"
 _APPLICATION_LOCK = Lock()
 
 
@@ -90,7 +92,8 @@ def _reviewed_path(local: LocalRelease, file_id: str) -> Path:
     if relative.anchor or ".." in relative.parts or path.suffix.lower() != ".flac" or expected is None:
         raise ValueError(f"Invalid reviewed FLAC path: {file_id}")
     try:
-        unchanged = path.resolve(strict=True) == path and file_state(path) == expected
+        unchanged = (directory_identity(local.root) == local.root_identity
+                     and path.resolve(strict=True) == path and file_state(path) == expected)
     except FileNotFoundError:
         unchanged = False
     if not unchanged:
@@ -98,26 +101,28 @@ def _reviewed_path(local: LocalRelease, file_id: str) -> Path:
     return path
 
 
-def _preflight(local: LocalRelease, file_id: str, changes: Collection[FieldDecision]) -> Path:
+def _preflight(local: LocalRelease, file_id: str, added_bytes: int) -> Path:
     path = _reviewed_path(local, file_id)
     if not os.access(path, os.W_OK) or not os.access(path.parent, os.W_OK):
         raise OSError(f"Write permission is required for {file_id} and its directory.")
-    added_bytes = sum(
-        len(FLAC_FIELDS[decision.field][0]) + len(value.encode("utf-8")) + 5
-        for decision in changes for value in decision.proposed_values or ()
-    )
     if shutil.disk_usage(path.parent).free < local.file_states[file_id].size + added_bytes:
         raise OSError(f"Insufficient space for a temporary copy of {file_id}.")
     return path
 
 
-def _unmanaged_blocks(audio: FLAC) -> tuple[tuple[int, bytes], ...]:
-    return tuple((block.code, block.write()) for block in audio.metadata_blocks if block.code not in (1, 4))
+def _is_front_cover(block: object) -> bool:
+    return isinstance(block, Picture) and block.type == FRONT_COVER_TYPE
+
+
+def _unmanaged_blocks(audio: FLAC, replace_front: bool) -> tuple[tuple[int, bytes], ...]:
+    return tuple((block.code, block.write()) for block in audio.metadata_blocks
+                 if block.code not in (1, 4) and not (replace_front and _is_front_cover(block)))
 
 
 def _write_file(
     local: LocalRelease, path: Path, file_id: str, changes: Collection[FieldDecision], warnings: list[str],
-) -> None:
+    *, front_cover: Picture | None = None,
+) -> bool:
     _reviewed_path(local, file_id)
     fd, name = mkstemp(prefix=STAGING_PREFIX, suffix=STAGING_SUFFIX, dir=path.parent)
     staged = Path(name)
@@ -127,7 +132,16 @@ def _write_file(
         audio = FLAC(str(staged))
         if sum(block.code == 4 for block in audio.metadata_blocks) > 1:
             raise ValueError("Multiple FLAC comment blocks require manual review.")
-        blocks = _unmanaged_blocks(audio)
+        replace_front = front_cover is not None
+        blocks = _unmanaged_blocks(audio, replace_front)
+        expected_front = ()
+        if front_cover is not None:
+            expected_front = (front_cover.write(),)
+            front = [picture for picture in audio.pictures if _is_front_cover(picture)]
+            if not changes and len(front) == 1 and front[0].data == front_cover.data and front[0].mime == front_cover.mime:
+                return False
+            audio.metadata_blocks[:] = [block for block in audio.metadata_blocks if not _is_front_cover(block)]
+            audio.add_picture(front_cover)
         vendor = audio.tags.vendor if isinstance(audio.tags, VCFLACDict) else None
         expected_tags = {key: tuple(values) for key, values in audio.items()}
         for decision in changes:
@@ -144,7 +158,9 @@ def _write_file(
         verified = FLAC(str(staged))
         verified_tags = {key: tuple(values) for key, values in verified.items()}
         verified_vendor = verified.tags.vendor if isinstance(verified.tags, VCFLACDict) else None
-        if expected_tags != verified_tags or blocks != _unmanaged_blocks(verified) or (
+        if replace_front and tuple(picture.write() for picture in verified.pictures if _is_front_cover(picture)) != expected_front:
+            raise ValueError("The staged FLAC front cover did not verify. Refresh the review before retrying.")
+        if expected_tags != verified_tags or blocks != _unmanaged_blocks(verified, replace_front) or (
             vendor is not None and verified_vendor != vendor
         ):
             raise ValueError("The staged FLAC did not verify. Refresh the review before retrying.")
@@ -152,6 +168,7 @@ def _write_file(
             os.fsync(stream.fileno())
         _reviewed_path(local, file_id)
         os.replace(staged, path)
+        return True
     finally:
         try:
             staged.unlink(missing_ok=True)
@@ -182,6 +199,29 @@ def apply_metadata(
         return _apply(local, proposal, accepted, groups)
 
 
+def embed_front_cover(local: LocalRelease, cover: PreparedCover) -> ApplyResult:
+    """Apply an approved front cover through the same staged FLAC writer."""
+    validate_prepared_cover(cover)
+    picture = Picture()
+    picture.type = FRONT_COVER_TYPE
+    picture.mime = "image/png" if cover.info.format == "PNG" else "image/jpeg"
+    picture.width, picture.height = cover.info.width, cover.info.height
+    picture.data = cover.data
+    fields: list[FieldResult] = []
+    warnings: list[str] = []
+    with _APPLICATION_LOCK:
+        for file_id in sorted(local.selected_file_ids):
+            try:
+                path = _preflight(local, file_id, len(cover.data) + 64)
+                changed = _write_file(local, path, file_id, (), warnings, front_cover=picture)
+            except (MutagenError, OSError, ValueError) as exc:
+                fields.append(FieldResult(file_id, "Embedded front cover", "failed", str(exc)))
+            else:
+                fields.append(FieldResult(file_id, "Embedded front cover", "changed" if changed else "skipped",
+                                          "Verified and replaced the FLAC." if changed else "This front cover is already embedded."))
+    return ApplyResult(tuple(fields), (), tuple(warnings))
+
+
 def _apply(
     local: LocalRelease, proposal: MetadataProposal, accepted: dict[DecisionKey, FieldDecision],
     groups: dict[str, frozenset[DecisionKey]],
@@ -203,7 +243,11 @@ def _apply(
     paths: dict[str, Path] = {}
     for file_id, changes in candidates.items():
         try:
-            paths[file_id] = _preflight(local, file_id, changes)
+            added_bytes = sum(
+                len(FLAC_FIELDS[decision.field][0]) + len(value.encode("utf-8")) + 5
+                for decision in changes for value in decision.proposed_values or ()
+            )
+            paths[file_id] = _preflight(local, file_id, added_bytes)
         except (OSError, ValueError) as exc:
             for decision in changes:
                 key = (file_id, decision.field)
@@ -267,9 +311,10 @@ def _apply(
 def find_staged_files(local: LocalRelease) -> tuple[Path, ...]:
     """List staging copies to inspect after an interrupted application."""
     directories = {(local.root / file.file_id).parent for file in local.files}
+    directories.add(local.root)
     return tuple(sorted(
         path for directory in directories
         if directory.is_relative_to(local.root) and directory.resolve() == directory
-        for path in directory.glob(f"{STAGING_PREFIX}*{STAGING_SUFFIX}")
-        if not path.is_symlink() and path.is_file()
+        for path in directory.glob(f"{STAGING_PREFIX}*.tmp")
+        if path.name.endswith((STAGING_SUFFIX, COVER_STAGING_SUFFIX)) and not path.is_symlink() and path.is_file()
     ))

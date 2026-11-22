@@ -177,7 +177,8 @@ class ReviewWindow:
             widget.configure(wraplength=max(1, event.width - 2))
 
     def _controls(self) -> None:
-        local_available = self.local is not None and not self.busy
+        busy = self.busy or self._artwork_writing()
+        local_available = self.local is not None and not busy
         local = local_available and not self.needs_refresh
         grouped = local and self.confirmed.get()
         editing = grouped and self.release is not None
@@ -185,8 +186,8 @@ class ReviewWindow:
         approved = approval.selected() if approval is not None else ()
         self.approval_text.set(f"{len(approved)} approved" if approval is not None else "")
         for widget, enabled in (
-            (self.folder_button, not self.busy), (self.files_button, not self.busy),
-            (self.url_entry, not self.busy), (self.load_button, grouped and bool(self.url.get().strip())),
+            (self.folder_button, not busy), (self.files_button, not busy),
+            (self.url_entry, not busy), (self.load_button, grouped and bool(self.url.get().strip())),
             (self.confirm_button, local), (self.refresh_button, local_available),
             (self.toggle_file_button, local and bool(self.file_tree.selection())),
             (self.artwork_button, local), (self.styles_button, editing), (self.date_button, editing),
@@ -194,8 +195,13 @@ class ReviewWindow:
             (self.clear_button, editing and bool(approved)), (self.apply_button, editing and bool(approved)),
         ):
             widget.state(("!disabled" if enabled else "disabled",))
-        self.diff.locked = self.busy
+        self.diff.locked = busy
         self._sync_mapping()
+        if self.artwork_window is not None and self.artwork_window.window.winfo_exists():
+            self.artwork_window.update_controls()
+
+    def _artwork_writing(self) -> bool:
+        return self.artwork_window is not None and self.artwork_window.writing
 
     def _start(self, text: str, task: Callable[[], T], done: Callable[[T], None], *, writing: bool = False) -> None:
         if self.busy:
@@ -220,7 +226,7 @@ class ReviewWindow:
         self._controls()
 
     def _close(self) -> None:
-        if self.writing:
+        if self.writing or self._artwork_writing():
             self.status.set("Wait for the current write to finish before closing.")
             return
         if self.artwork_window is not None and self.artwork_window.window.winfo_exists():
@@ -229,11 +235,19 @@ class ReviewWindow:
         self.root.destroy()
 
     def _open_artwork(self) -> None:
-        if self.busy or self.needs_refresh or self.local is None:
+        local = self.local
+        if self.busy or self.needs_refresh or local is None or self._artwork_writing():
             return
         if self.artwork_window is not None and self.artwork_window.window.winfo_exists():
             self.artwork_window.close()
-        self.artwork_window = ArtworkWindow(self.root, self.local, self.release if self.confirmed.get() else None)
+        release = self.release if self.confirmed.get() else None
+
+        def can_apply() -> bool:
+            return (not self.busy and not self.needs_refresh and self.confirmed.get()
+                    and self.local is local and self.release is release)
+
+        self.artwork_window = ArtworkWindow(self.root, local, release, can_apply=can_apply,
+                                            on_state_change=self._controls, refresh_flacs=self._refresh)
 
     def open_paths(self, paths: list[Path], release_folder: Path | None = None) -> None:
         def opened(local: LocalRelease) -> None:
@@ -313,7 +327,7 @@ class ReviewWindow:
 
     def _toggle_file(self) -> None:
         selected = self.file_tree.selection()
-        if not selected or self.local is None or self.busy or self.needs_refresh:
+        if not selected or self.local is None or self.busy or self.needs_refresh or self._artwork_writing():
             return
         file_id = selected[0]
         self.local = replace(self.local, selected_file_ids=self.local.selected_file_ids.symmetric_difference({file_id}))
@@ -330,7 +344,8 @@ class ReviewWindow:
             file = next((file for file in local.files if file.file_id == file_id), None)
             title = "" if file is None else " · ".join(file.tags.get("%TITLE%", ()) + file.tags.get("%ALBUM%", ()))
             self.local_tag.configure(text=title)
-        if self.busy or local is None or release is None or not self.confirmed.get() or file_id not in local.selected_file_ids:
+        if (self.busy or self._artwork_writing() or local is None or release is None
+                or not self.confirmed.get() or file_id not in local.selected_file_ids):
             self.track_choice.configure(state="disabled", values=())
             self.track_choice.set("")
             return
@@ -494,7 +509,8 @@ class ReviewWindow:
 
     def _apply(self) -> None:
         local, proposal, approval = self.local, self.diff.proposal, self.diff.approval
-        if self.busy or not self.confirmed.get() or local is None or proposal is None or approval is None:
+        if (self.busy or self._artwork_writing() or not self.confirmed.get()
+                or local is None or proposal is None or approval is None):
             return
         approved = approval.selected()
         if not approved:

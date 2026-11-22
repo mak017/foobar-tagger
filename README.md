@@ -31,7 +31,7 @@ linked approval groups; later application orchestration must enforce them.
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
 given inputs. Discogs search, automatic matching, reissue content comparison,
 artist credits, classification, and non-vinyl numbering are pending. The artwork
-window previews existing and proposed covers. Saving and embedding artwork are pending.
+window previews covers and applies separately approved folder or embedded artwork.
 
 ## Review and apply metadata (PowerShell)
 
@@ -55,7 +55,7 @@ genre changes are selected together, and editing the inputs clears approvals.
 **Apply approved** asks for confirmation, displays each field's outcome, and
 refreshes the comparison. [Review window screenshot](docs/review-window.jpg)
 
-## Preview artwork
+## Review and apply artwork
 
 Choose **Artwork** in the review window to inspect images in the release folder
 and pictures embedded in selected FLACs. Load the Discogs edition to compare its
@@ -67,8 +67,21 @@ The preview shows decoded dimensions, encoded bytes, and the prospective
 `cover.png` or `cover.jpg` name. Candidates must be at least 1000 pixels on both
 axes and strictly under 5,000,000 bytes after encoding. The converter preserves
 aspect ratio and never upscales. Existing artwork stays unverified until its
-edition identity is established. The window leaves cover files and FLACs untouched.
+edition identity is established.
 [Artwork review screenshot](docs/artwork-review.jpg)
+
+Once you confirm the release grouping, choose **Save folder cover**, **Embed in
+selected FLACs**, or both. Review the exact paths and confirm that the replacement
+matches your copy before applying. The folder output installs the verified cover
+before removing reviewed alternate `cover`, `folder`, or `front` images. The
+embedded output updates front covers while preserving other pictures and tags in
+the selected FLACs. Oversized or unverified replacements can be skipped while you
+continue with metadata review.
+
+Each output is staged and verified before replacement. A failure in one output
+can leave the other applied. The artwork window reports the outcome for each file
+and flags any alternate cover that could not be removed.
+[Artwork approval screenshot](docs/artwork-approval.jpg)
 
 This application uses the Discogs API independently of Discogs, with no
 affiliation, sponsorship, or endorsement. Discogs is a trademark of Zink Media,
