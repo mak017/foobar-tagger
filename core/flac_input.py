@@ -88,7 +88,8 @@ def _read_file(path: Path, root: Path) -> tuple[LocalFile, FileState]:
                 tags[field] = present[0]
             elif present:
                 tags[field] = tuple(value for values in present for value in values)
-    return LocalFile(file_id, tags), before
+    duration = audio.info.length
+    return LocalFile(file_id, tags, duration if duration > 0 else None), before
 
 
 def inspect_release(paths: list[Path], release_folder: Path | None = None) -> LocalRelease:

@@ -19,6 +19,7 @@ class InvalidMetadataPolicy(ValueError):
 class LocalFile:
     file_id: str
     tags: Mapping[str, tuple[str, ...]]
+    duration_seconds: float | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "tags", MappingProxyType({
@@ -31,6 +32,7 @@ class EditionTrack:
     track_id: str
     position: str
     title: str = ""
+    duration_seconds: int | None = None
 
 
 @dataclass(frozen=True)

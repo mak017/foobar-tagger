@@ -29,8 +29,8 @@ vocabulary validation and selection consistency. Genre changes are returned in
 linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
-given inputs. Discogs search, automatic matching, reissue content comparison,
-artist credits, classification, and non-vinyl numbering are pending. The artwork
+given inputs. Automatic track matching, reissue content comparison, artist
+credits, classification, and non-vinyl numbering are pending. The artwork
 window previews covers and applies separately approved folder or embedded artwork.
 
 ## Review and apply metadata (PowerShell)
@@ -43,8 +43,19 @@ with an optional release folder or list of selected FLACs.
 .\.venv\Scripts\python main.py --review '.\Release' --accept-style Trance
 ```
 
-Confirm the release grouping, paste a Discogs edition URL, and load the edition.
+Confirm the release grouping, then choose **Find editions** or load a known
+Discogs release URL directly. Search starts with the folder catalog number when
+available. Use the editable filters or switch to the artist and title clues to
+broaden the search. Compare the candidate catalog, format, year, country, and
+label. **Preview tracklist** shows Discogs positions, titles, and available
+durations alongside the selected FLAC evidence. **Use selected edition** loads
+the edition you choose, even when the results contain several editions with the
+same catalog number. If Discogs requires authentication, supply a personal
+token through `DISCOGS_TOKEN`. [Edition search screenshot](docs/edition-search.jpg)
+
 Select each file in the left pane and choose its corresponding Discogs track.
+When both durations are known, differences over five seconds are shown beside
+the local tags. Changing editions clears the track mappings and approvals.
 Use **Edit date** and **Edit styles** to update the release-wide values. The
 existing and proposed values appear side by side, with source evidence and
 unresolved issues below the table. The vinyl numbering rules use the chosen

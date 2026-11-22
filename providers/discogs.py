@@ -1,11 +1,11 @@
-"""Load a specific Discogs edition from a release URL."""
+"""Search Discogs release editions and load their metadata and artwork."""
 
 from dataclasses import dataclass
 import json
 import os
 import re
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from urllib import request
 
 from core.rules_engine import DateSource, Edition, EditionTrack, GenreSource, ReleaseDates
@@ -22,6 +22,37 @@ class DiscogsRelease:
     title: str
     edition: Edition
     images: tuple[ReleaseImage, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReleaseQuery:
+    text: str = ""
+    catalog: str = ""
+    artist: str = ""
+    title: str = ""
+    format_name: str = ""
+
+
+@dataclass(frozen=True)
+class ReleaseCandidate:
+    release_id: str
+    title: str
+    catalog: str
+    formats: tuple[str, ...]
+    labels: tuple[str, ...]
+    year: str
+    country: str
+
+    @property
+    def url(self) -> str:
+        return f"https://www.discogs.com/release/{self.release_id}"
+
+
+@dataclass(frozen=True)
+class SearchPage:
+    candidates: tuple[ReleaseCandidate, ...]
+    page: int
+    pages: int
 
 
 class DiscogsError(ValueError):
@@ -51,6 +82,84 @@ def _request(url: str, accept: str) -> request.Request:
             raise DiscogsError("DISCOGS_TOKEN must be a single token without spaces.")
         req.add_unredirected_header("Authorization", f"Discogs token={token}")
     return req
+
+
+def _json(req: request.Request, action: str) -> object:
+    try:
+        with request.urlopen(req, timeout=10) as response:
+            return json.load(response)
+    except HTTPError as exc:
+        exc.close()
+        if exc.code == 429:
+            raise DiscogsError("Discogs rate limit reached. Wait before retrying.") from exc
+        if exc.code in (401, 403):
+            hint = ("Check the token and API access." if req.has_header("Authorization") else
+                    "Set a personal DISCOGS_TOKEN if authentication is required.")
+            raise DiscogsError(f"Discogs denied {action} (HTTP {exc.code}). {hint}") from exc
+        raise DiscogsError(f"Discogs returned HTTP {exc.code} for {action}. Check the request or retry.") from exc
+    except (URLError, OSError) as exc:
+        raise DiscogsError(f"Could not reach Discogs for {action}: {exc}. Retry the request.") from exc
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise DiscogsError(f"Discogs returned invalid JSON for {action}. Retry the request.") from exc
+
+
+def _text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _text_list(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(dict.fromkeys(text for item in value if (text := _text(item))))
+
+
+def _duration(value: object) -> int | None:
+    duration = _text(value)
+    if not re.fullmatch(r"(?:[0-9]{1,3}:)?[0-9]{1,3}:[0-5][0-9]", duration):
+        return None
+    parts = [int(part) for part in duration.split(":")]
+    if len(parts) == 3 and parts[1] >= 60:
+        return None
+    seconds = sum(part * 60 ** index for index, part in enumerate(reversed(parts)))
+    return seconds or None
+
+
+def search_releases(query: ReleaseQuery, page: int = 1) -> SearchPage:
+    """Return a page of edition candidates. The caller must select an edition."""
+    filters = {name: value.strip() for name, value in (
+        ("q", query.text), ("catno", query.catalog), ("artist", query.artist),
+        ("release_title", query.title), ("format", query.format_name),
+    ) if value.strip()}
+    if not filters or page < 1:
+        raise DiscogsError("Enter at least one search field and use a positive page number.")
+    query_string = urlencode({**filters, "type": "release", "page": page, "per_page": 25})
+    request_url = f"https://api.discogs.com/database/search?{query_string}"
+    data = _json(_request(request_url, "application/json"), "release search")
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise DiscogsError("Discogs did not return a release search result list.")
+    pagination = data.get("pagination")
+    if not isinstance(pagination, dict) or pagination.get("page") != page:
+        raise DiscogsError("Discogs did not return the requested result page.")
+    pages = pagination.get("pages")
+    if type(pages) is not int or pages < 0:
+        raise DiscogsError("Discogs returned invalid search pagination.")
+
+    candidates: dict[str, ReleaseCandidate] = {}
+    for item in data["results"]:
+        if not isinstance(item, dict) or item.get("type") != "release":
+            continue
+        identity, title, year = item.get("id"), _text(item.get("title")), item.get("year")
+        if type(identity) is not int or identity < 1 or not title:
+            continue
+        release_id = str(identity)
+        if release_id not in candidates:
+            year_text = str(year) if type(year) is int else _text(year)
+            candidates[release_id] = ReleaseCandidate(
+                release_id, title, _text(item.get("catno")), _text_list(item.get("format")),
+                _text_list(item.get("label")), year_text if re.fullmatch(r"[1-9][0-9]{3}", year_text) else "",
+                _text(item.get("country")),
+            )
+    return SearchPage(tuple(candidates.values()), page, max(page, pages))
 
 
 class _ImageRedirect(request.HTTPRedirectHandler):
@@ -106,16 +215,7 @@ def load_release(url: str) -> DiscogsRelease:
 
     release_id = release_match[1]
     req = _request(f"https://api.discogs.com/releases/{release_id}", "application/json")
-    try:
-        with request.urlopen(req, timeout=10) as response:
-            data = json.load(response)
-    except HTTPError as exc:
-        exc.close()
-        raise DiscogsError(f"Discogs returned HTTP {exc.code} for release {release_id}. Check the URL or retry.") from exc
-    except (URLError, OSError) as exc:
-        raise DiscogsError(f"Could not reach Discogs for release {release_id}: {exc}. Retry the lookup.") from exc
-    except (json.JSONDecodeError, UnicodeError) as exc:
-        raise DiscogsError(f"Discogs returned invalid JSON for release {release_id}. Retry the lookup.") from exc
+    data = _json(req, f"release {release_id}")
 
     if not isinstance(data, dict) or type(data.get("id")) is not int or str(data["id"]) != release_id:
         raise DiscogsError(f"Discogs did not return the requested edition {release_id}.")
@@ -135,7 +235,7 @@ def load_release(url: str) -> DiscogsRelease:
         position, track_title = entry.get("position"), entry.get("title")
         tracks.append(EditionTrack(
             str(index), position.strip() if isinstance(position, str) else "",
-            track_title if isinstance(track_title, str) else "",
+            track_title if isinstance(track_title, str) else "", _duration(entry.get("duration")),
         ))
 
     formats = data.get("formats")

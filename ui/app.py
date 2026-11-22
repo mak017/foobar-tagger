@@ -13,9 +13,10 @@ from core.clue_parser import parse_folder_clues
 from core.flac_input import LocalRelease, inspect_release
 from core.rules_engine import ManualDate, MetadataPolicy, ReleaseContext, propose_metadata
 from core.tag_writer import ApplyResult, apply_metadata, find_staged_files
-from providers.discogs import DiscogsRelease, load_release
+from providers.discogs import DiscogsRelease, ReleaseCandidate, load_release
 from ui.artwork_panel import ArtworkWindow
 from ui.diff_table import DiffTable
+from ui.edition_search import EditionSearchWindow, duration_text
 from ui.theme import BACKGROUND, INPUT, TEXT, apply_theme
 
 
@@ -28,6 +29,7 @@ class ReviewWindow:
         self.local: LocalRelease | None = None
         self.release: DiscogsRelease | None = None
         self.artwork_window: ArtworkWindow | None = None
+        self.edition_search: EditionSearchWindow | None = None
         self.mapping: dict[str, str] = {}
         self.manual_date: ManualDate | None = None
         self.manual_styles: tuple[str, ...] | None = None
@@ -79,8 +81,10 @@ class ReviewWindow:
         self.url_entry.bind("<Return>", lambda _event: self._load_edition())
         self.load_button = ttk.Button(provider, text="Load edition", command=self._load_edition)
         self.load_button.grid(row=0, column=2, padx=(8, 0))
+        self.search_button = ttk.Button(provider, text="Find editions…", command=self._search_editions)
+        self.search_button.grid(row=0, column=3, padx=(6, 0))
         edition_label = ttk.Label(provider, textvariable=self.edition_text, style="Panel.TLabel")
-        edition_label.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        edition_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         edition_label.bind("<Configure>", self._wrap)
 
         panes = ttk.Panedwindow(shell, orient="horizontal")
@@ -188,6 +192,7 @@ class ReviewWindow:
         for widget, enabled in (
             (self.folder_button, not busy), (self.files_button, not busy),
             (self.url_entry, not busy), (self.load_button, grouped and bool(self.url.get().strip())),
+            (self.search_button, grouped),
             (self.confirm_button, local), (self.refresh_button, local_available),
             (self.toggle_file_button, local and bool(self.file_tree.selection())),
             (self.artwork_button, local), (self.styles_button, editing), (self.date_button, editing),
@@ -231,6 +236,8 @@ class ReviewWindow:
             return
         if self.artwork_window is not None and self.artwork_window.window.winfo_exists():
             self.artwork_window.close()
+        if self.edition_search is not None and self.edition_search.window.winfo_exists():
+            self.edition_search.close()
         self.pool.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
@@ -340,27 +347,38 @@ class ReviewWindow:
         selection = self.file_tree.selection()
         file_id = selection[0] if selection else ""
         local, release = self.local, self.release
+        tracks = release.edition.tracks if release is not None else ()
+        track_id = self.mapping.get(file_id)
+        mapped = next((track for track in tracks if track.track_id == track_id), None)
         if local is not None:
             file = next((file for file in local.files if file.file_id == file_id), None)
-            title = "" if file is None else " · ".join(file.tags.get("%TITLE%", ()) + file.tags.get("%ALBUM%", ()))
-            self.local_tag.configure(text=title)
+            details: list[str] = []
+            if file is not None:
+                details.extend(file.tags.get("%TITLE%", ()) + file.tags.get("%ALBUM%", ()))
+                if file.duration_seconds is not None:
+                    details.append(duration_text(file.duration_seconds))
+                    if mapped is not None and mapped.duration_seconds is not None:
+                        delta = abs(file.duration_seconds - mapped.duration_seconds)
+                        if delta > 5:
+                            details.append(f"Discogs length differs by {delta:.1f} s")
+            self.local_tag.configure(text=" · ".join(details))
         if (self.busy or self._artwork_writing() or local is None or release is None
                 or not self.confirmed.get() or file_id not in local.selected_file_ids):
             self.track_choice.configure(state="disabled", values=())
             self.track_choice.set("")
             return
-        tracks = release.edition.tracks
         self.track_choice.configure(state="readonly", values=("Unmapped", *(
-            f"{index}. {track.position or '—'} · {track.title or 'Untitled'}" for index, track in enumerate(tracks, 1)
+            " · ".join(filter(None, (f"{index}. {track.position or '—'}", track.title or "Untitled",
+                                     duration_text(track.duration_seconds))))
+            for index, track in enumerate(tracks, 1)
         )))
-        track_id = self.mapping.get(file_id)
         match = next((index for index, track in enumerate(tracks, 1) if track.track_id == track_id), 0)
         self.track_choice.current(match)
 
     def _map_file(self, _event: tk.Event) -> None:
         index = self.track_choice.current()
         selection = self.file_tree.selection()
-        if self.busy or not selection or self.release is None or index < 0:
+        if self.busy or self._artwork_writing() or not selection or self.release is None or index < 0:
             return
         file_id = selection[0]
         if index == 0:
@@ -384,9 +402,29 @@ class ReviewWindow:
             self._show_files()
         self._rebuild()
 
+    def _search_editions(self) -> None:
+        local = self.local
+        if self.busy or self._artwork_writing() or self.needs_refresh or local is None or not self.confirmed.get():
+            return
+        if self.edition_search is not None and self.edition_search.window.winfo_exists():
+            self.edition_search.window.lift()
+            return
+
+        def chosen(candidate: ReleaseCandidate, preview: DiscogsRelease | None) -> None:
+            if self.local is not local or not self.confirmed.get() or self.busy or self._artwork_writing():
+                self.status.set("The local review changed. Confirm the release grouping before choosing an edition.")
+                return
+            self.url.set(candidate.url)
+            if preview is None:
+                self._load_edition()
+            else:
+                self._accept_edition(preview)
+
+        self.edition_search = EditionSearchWindow(self.root, local, chosen)
+
     def _load_edition(self) -> None:
         url = self.url.get().strip()
-        if self.busy or self.local is None or not self.confirmed.get() or not url:
+        if self.busy or self._artwork_writing() or self.local is None or not self.confirmed.get() or not url:
             return
         self.release = None
         self.mapping.clear()
@@ -394,12 +432,13 @@ class ReviewWindow:
         self._show_files()
         self._rebuild()
 
-        def loaded(release: DiscogsRelease) -> None:
-            self.release = release
-            self.status.set("Select a file and confirm its Discogs track to review changes.")
-            self._rebuild()
+        self._start("Loading the Discogs edition…", lambda: load_release(url), self._accept_edition)
 
-        self._start("Loading the Discogs edition…", lambda: load_release(url), loaded)
+    def _accept_edition(self, release: DiscogsRelease) -> None:
+        self.release = release
+        self.status.set("Select a file and confirm its Discogs track to review changes.")
+        self._show_files()
+        self._rebuild()
 
     def _rebuild(self) -> None:
         local, release = self.local, self.release
@@ -408,7 +447,7 @@ class ReviewWindow:
                                   "Confirm the file grouping to load an edition.")
             self.diff.show(None)
         elif release is None:
-            self.edition_text.set("Load a specific Discogs edition.")
+            self.edition_text.set("Find editions or load a specific Discogs release URL.")
             self.diff.show(None)
         else:
             edition = release.edition
