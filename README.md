@@ -1,9 +1,16 @@
 # foobar-tagger
 
-A planned review-before-apply metadata and artwork tool. See [PLAN.md](PLAN.md)
-for behavior and [DESIGN.md](DESIGN.md) for the approved metadata proposal interface.
+A review-before-apply metadata and artwork project with a read-only FLAC preview.
+See [PLAN.md](PLAN.md) for the roadmap and [DESIGN.md](DESIGN.md) for the metadata
+proposal interface.
 
 ## Current implementation
+
+`main.py` previews one local FLAC release. It lists selected and context-only
+files, extracts folder clues, and flags differing album or album-artist tags.
+After local grouping is confirmed, it can load a specific Discogs release URL,
+show the tracklist, accept explicit mappings, and print a read-only proposal with
+existing values, proposed changes, source evidence, and unresolved fields.
 
 The pure `core.rules_engine.propose_metadata(context, policy)` function implements
 vinyl/LP numbering, release-wide genres, and release-wide dates. Vinyl supports continuous release numbering,
@@ -21,17 +28,47 @@ Manual release-wide genre choices override provider evidence but still require
 vocabulary validation and selection consistency. Genre changes are returned in
 linked approval groups; later application orchestration must enforce them.
 
-`MetadataProposal.evaluated_rules` explicitly identifies the implemented rule
-families. A proposal is not write authorization or proof that other metadata rules
-have passed. Artist credits, classification, and non-vinyl numbering are
-not implemented. There are no providers, audio writes, artwork
-processing, CLI application, or review UI yet.
+`MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
+given inputs. Discogs search, automatic matching, reissue content comparison,
+artist credits, classification, non-vinyl numbering, artwork, the editable review
+window, and file writes are pending.
+
+## Preview one release (PowerShell)
+
+Use the environment setup below or install only the runtime dependencies with
+`.\.venv\Scripts\python -m pip install -r requirements.txt`.
+
+Launch with a release folder to select all its FLACs, or list just the FLACs you
+want to review. The preview includes sibling FLACs in the release folder and its
+immediate numbered disc subfolders for context. With file input, use
+`--release-folder` to correct the inferred root if needed.
+
+```powershell
+.\.venv\Scripts\python main.py '.\Release'
+.\.venv\Scripts\python main.py '.\Release\Track 01.flac'
+```
+
+Check the grouping and selection, then supply `--confirm-release` and the URL
+for the specific Discogs edition. Run this step to see the edition's track
+positions. To confirm a mapping, repeat the command with `--map` once per
+selected file, using the relative path displayed in the preview.
+
+```powershell
+$releaseUrl = Read-Host 'Paste the URL of the Discogs edition'
+.\.venv\Scripts\python main.py '.\Release\Track 01.flac' `
+    --confirm-release --discogs-url $releaseUrl `
+    --map 'Track 01.flac' A1 --accept-style Trance
+```
+
+Repeat `--accept-style` for each Discogs style accepted for this preview. Dates
+stay unresolved until the relationship between edition and original release
+content is established. The CLI preview does not modify any files.
 
 ## Development (PowerShell)
 
-Developed and tested with Python 3.13.7. Runtime code and tests use only the Python
-standard library. Install the pinned Pyright development dependency for static
-type checking (Node.js must be available, or the Python wrapper may download it).
+Developed and tested with Python 3.13.7. The FLAC reader uses Mutagen, and the
+development requirements also install Pyright for static type checking. Node.js
+must be available, or the Python wrapper may download it.
 
 ```powershell
 python -m venv .venv

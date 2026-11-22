@@ -30,6 +30,7 @@ class LocalFile:
 class EditionTrack:
     track_id: str
     position: str
+    title: str = ""
 
 
 @dataclass(frozen=True)
