@@ -29,8 +29,8 @@ vocabulary validation and selection consistency. Genre changes are returned in
 linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
-given inputs. Automatic track matching, reissue content comparison, artist
-credits, classification, and non-vinyl numbering are pending. The artwork
+given inputs. Reissue content comparison, artist credits, classification, and
+non-vinyl numbering are pending. The artwork
 window previews covers and applies separately approved folder or embedded artwork.
 
 ## Review and apply metadata (PowerShell)
@@ -53,9 +53,14 @@ the edition you choose, even when the results contain several editions with the
 same catalog number. If Discogs requires authentication, supply a personal
 token through `DISCOGS_TOKEN`. [Edition search screenshot](docs/edition-search.jpg)
 
-Select each file in the left pane and choose its corresponding Discogs track.
-When both durations are known, differences over five seconds are shown beside
-the local tags. Changing editions clears the track mappings and approvals.
+After an edition is loaded, a question mark beside a position marks an
+unconfirmed suggestion. Select that file to inspect its evidence and choose
+**Use suggestion** or pick a track manually. Suggestions use the local title
+tag or filename, the mix or version, and corroboration from duration or position.
+Duration differences of at most five seconds can support a suggestion. Larger
+differences, conflicting versions or positions, duplicate claims, and incomplete
+tracklists are left for manual review. Changing editions clears the mappings and
+approvals. [Track mapping screenshot](docs/track-mapping.jpg)
 Use **Edit date** and **Edit styles** to update the release-wide values. The
 existing and proposed values appear side by side, with source evidence and
 unresolved issues below the table. The vinyl numbering rules use the chosen

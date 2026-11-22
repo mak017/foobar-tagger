@@ -11,6 +11,7 @@ from typing import TypeVar
 
 from core.clue_parser import parse_folder_clues
 from core.flac_input import LocalRelease, inspect_release
+from core.matching import MAX_DURATION_DIFFERENCE, TrackEvidence, TrackSuggestion, suggest_track_mappings
 from core.rules_engine import ManualDate, MetadataPolicy, ReleaseContext, propose_metadata
 from core.tag_writer import ApplyResult, apply_metadata, find_staged_files
 from providers.discogs import DiscogsRelease, ReleaseCandidate, load_release
@@ -23,6 +24,23 @@ from ui.theme import BACKGROUND, INPUT, TEXT, apply_theme
 T = TypeVar("T")
 
 
+def _track_evidence(candidate: TrackEvidence, source: str) -> str:
+    agreeing_title = (f"Title and version agree ({source})" if candidate.version_explicit else
+                      f"Title agrees ({source}) · Version unspecified")
+    title = {
+        "match": agreeing_title,
+        "version_missing": "Version missing on one side",
+        "version_conflict": "Versions differ",
+    }[candidate.title]
+    duration = ("Duration unavailable" if candidate.duration_difference is None else
+                f"Duration difference {candidate.duration_difference:.1f} s")
+    position = {"match": "Position agrees", "conflict": "Position differs", "unknown": "Position unavailable"}[candidate.position]
+    notes = [title, duration, position]
+    if candidate.claimed:
+        notes.append("Already mapped")
+    return " · ".join(notes)
+
+
 class ReviewWindow:
     def __init__(self, root: tk.Tk, discogs_url: str, accepted_styles: frozenset[str]) -> None:
         self.root = root
@@ -31,6 +49,7 @@ class ReviewWindow:
         self.artwork_window: ArtworkWindow | None = None
         self.edition_search: EditionSearchWindow | None = None
         self.mapping: dict[str, str] = {}
+        self.suggestions: dict[str, TrackSuggestion] = {}
         self.manual_date: ManualDate | None = None
         self.manual_styles: tuple[str, ...] | None = None
         self.policy = MetadataPolicy(accepted_styles=accepted_styles)
@@ -122,15 +141,22 @@ class ReviewWindow:
         self.refresh_button = ttk.Button(local_actions, text="Refresh files", command=self._refresh)
         self.refresh_button.pack(side="right")
         self.confirm_button = ttk.Checkbutton(local, text="Confirm release grouping", variable=self.confirmed,
-                                              command=self._rebuild)
+                                              command=self._confirm_grouping)
         self.confirm_button.grid(row=5, column=0, sticky="w")
         ttk.Label(local, text="Map selected file to Discogs track", style="Panel.TLabel").grid(row=6, column=0, sticky="w", pady=(8, 2))
-        self.track_choice = ttk.Combobox(local, state="disabled", width=29)
-        self.track_choice.grid(row=7, column=0, sticky="ew")
+        mapping_bar = ttk.Frame(local, style="Panel.TFrame")
+        mapping_bar.grid(row=7, column=0, sticky="ew")
+        mapping_bar.columnconfigure(0, weight=1)
+        self.track_choice = ttk.Combobox(mapping_bar, state="disabled", width=17)
+        self.track_choice.grid(row=0, column=0, sticky="ew")
         self.track_choice.bind("<<ComboboxSelected>>", self._map_file)
+        self.suggestion_button = ttk.Button(mapping_bar, text="Use suggestion", command=self._use_suggestion, state="disabled")
+        self.suggestion_button.grid(row=0, column=1, padx=(6, 0))
+        self.mapping_evidence = ttk.Label(local, style="Panel.TLabel", wraplength=284, justify="left")
+        self.mapping_evidence.grid(row=8, column=0, sticky="ew", pady=(7, 0))
         warning_label = ttk.Label(local, textvariable=self.warnings, style="Panel.TLabel", foreground="#f3bd76",
                                   wraplength=284)
-        warning_label.grid(row=8, column=0, sticky="ew", pady=(6, 0))
+        warning_label.grid(row=9, column=0, sticky="ew", pady=(6, 0))
 
         review.columnconfigure(0, weight=1)
         review.rowconfigure(1, weight=1)
@@ -311,9 +337,19 @@ class ReviewWindow:
         self.path_text.set(f"{local.root.name}   ·   {local.root.parent}")
         self.scope_text.set(f"{len(local.selected_file_ids)} selected · {len(local.files) - len(local.selected_file_ids)} context only")
         tracks = {} if self.release is None else {track.track_id: track.position or "Confirmed" for track in self.release.edition.tracks}
+        self.suggestions.clear()
+        if self.release is not None and self.confirmed.get():
+            context = ReleaseContext(local.files, local.selected_file_ids, self.release.edition, self.mapping)
+            self.suggestions = {suggestion.file_id: suggestion for suggestion in suggest_track_mappings(context)}
         for file in local.files:
             in_selection = file.file_id in local.selected_file_ids
             position = tracks.get(self.mapping.get(file.file_id, ""), "—") if in_selection else "—"
+            suggestion = self.suggestions.get(file.file_id)
+            if suggestion is not None:
+                if suggestion.suggested_id is not None:
+                    position = f"{tracks[suggestion.suggested_id]}?"
+                elif suggestion.candidates:
+                    position = "Review"
             self.file_tree.insert("", "end", iid=file.file_id,
                                   values=("Selected" if in_selection else "Context", file.file_id, position))
         if selected and self.file_tree.exists(selected[0]):
@@ -323,6 +359,10 @@ class ReviewWindow:
             self.file_tree.selection_set(first)
             self.file_tree.focus(first)
         self.warnings.set(local.warnings[0] if local.warnings else "")
+
+    def _confirm_grouping(self) -> None:
+        self._show_files()
+        self._rebuild()
 
     def _toggle_file_key(self, _event: tk.Event) -> str:
         self._toggle_file()
@@ -359,13 +399,15 @@ class ReviewWindow:
                     details.append(duration_text(file.duration_seconds))
                     if mapped is not None and mapped.duration_seconds is not None:
                         delta = abs(file.duration_seconds - mapped.duration_seconds)
-                        if delta > 5:
+                        if delta > MAX_DURATION_DIFFERENCE:
                             details.append(f"Discogs length differs by {delta:.1f} s")
             self.local_tag.configure(text=" · ".join(details))
         if (self.busy or self._artwork_writing() or local is None or release is None
                 or not self.confirmed.get() or file_id not in local.selected_file_ids):
             self.track_choice.configure(state="disabled", values=())
             self.track_choice.set("")
+            self.suggestion_button.state(("disabled",))
+            self.mapping_evidence.configure(text="")
             return
         self.track_choice.configure(state="readonly", values=("Unmapped", *(
             " · ".join(filter(None, (f"{index}. {track.position or '—'}", track.title or "Untitled",
@@ -374,22 +416,55 @@ class ReviewWindow:
         )))
         match = next((index for index, track in enumerate(tracks, 1) if track.track_id == track_id), 0)
         self.track_choice.current(match)
+        suggestion = self.suggestions.get(file_id)
+        self.suggestion_button.state(("!disabled" if suggestion is not None and suggestion.suggested_id is not None else "disabled",))
+        self.mapping_evidence.configure(text=self._suggestion_text(suggestion))
+
+    @staticmethod
+    def _suggestion_text(suggestion: TrackSuggestion | None) -> str:
+        if suggestion is None:
+            return ""
+        if suggestion.suggested_id is not None:
+            candidate = next(item for item in suggestion.candidates if item.track.track_id == suggestion.suggested_id)
+            position = f"{candidate.track.position} · " if candidate.track.position else ""
+            return f"Suggested: {position}{candidate.track.title}\n{_track_evidence(candidate, suggestion.title_source)}"
+        candidates = [item for item in suggestion.candidates if item.plausible] or list(suggestion.candidates)
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            return f"{suggestion.reason}\n{candidate.track.position or candidate.track.title} · {_track_evidence(candidate, suggestion.title_source)}"
+        positions = ", ".join(item.track.position or item.track.title for item in candidates[:3])
+        if len(candidates) > 3:
+            positions += f" and {len(candidates) - 3} more"
+        return f"{suggestion.reason}\nCandidates: {positions}" if positions else suggestion.reason
 
     def _map_file(self, _event: tk.Event) -> None:
         index = self.track_choice.current()
         selection = self.file_tree.selection()
         if self.busy or self._artwork_writing() or not selection or self.release is None or index < 0:
             return
-        file_id = selection[0]
-        if index == 0:
+        track_id = self.release.edition.tracks[index - 1].track_id if index else None
+        self._set_mapping(selection[0], track_id)
+
+    def _use_suggestion(self) -> None:
+        selection = self.file_tree.selection()
+        if not selection:
+            return
+        suggestion = self.suggestions.get(selection[0])
+        if suggestion is not None and suggestion.suggested_id is not None:
+            self._set_mapping(suggestion.file_id, suggestion.suggested_id)
+
+    def _set_mapping(self, file_id: str, track_id: str | None) -> None:
+        if (self.busy or self._artwork_writing() or self.local is None or not self.confirmed.get()
+                or file_id not in self.local.selected_file_ids):
+            return
+        if track_id is None:
             self.mapping.pop(file_id, None)
         else:
-            track = self.release.edition.tracks[index - 1]
-            if any(mapped == track.track_id for other, mapped in self.mapping.items() if other != file_id):
+            if any(mapped == track_id for other, mapped in self.mapping.items() if other != file_id):
                 self.status.set("That Discogs track is already mapped to another selected file.")
                 self._sync_mapping()
                 return
-            self.mapping[file_id] = track.track_id
+            self.mapping[file_id] = track_id
         self.status.set("Mapping updated. Review the new proposal before applying.")
         self._show_files()
         self._rebuild()
@@ -436,7 +511,7 @@ class ReviewWindow:
 
     def _accept_edition(self, release: DiscogsRelease) -> None:
         self.release = release
-        self.status.set("Select a file and confirm its Discogs track to review changes.")
+        self.status.set("Review the track suggestions or choose a track manually.")
         self._show_files()
         self._rebuild()
 
