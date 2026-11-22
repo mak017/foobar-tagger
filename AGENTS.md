@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository currently contains only `PLAN.md`, the architecture and implementation specification for the foobar2000 Auto-Tagger & Cover-Art Engine. Consult it before implementing metadata rules or provider behavior.
+`PLAN.md` specifies behavior and `DESIGN.md` records the approved proposal interface. Consult them before implementing metadata rules or provider behavior. Current code is in `core/`, with tests under `tests/`; see `README.md` for implemented scope.
 
 The planned Python layout is:
 
@@ -13,13 +13,15 @@ The planned Python layout is:
 - `ui/`: Tkinter review window, metadata diff, and artwork preview.
 - `Tag_Selection.bat`: Windows launcher for foobar2000 integration.
 
-These files and directories are not implemented yet. Add tests under `tests/`; keep small synthetic fixtures there rather than committing music libraries or downloaded artwork.
+The layout above includes future modules; check the filesystem before assuming a path is implemented. Keep small synthetic fixtures under `tests/` rather than committing music libraries or downloaded artwork.
 
 ## Build, Test, and Development Commands
 
-No build system, dependency manifest, runnable entry point, or test runner is configured yet. Do not assume documented architecture paths are executable.
+Use Python 3.13 and the isolated `.venv`. Install development tools with `.\.venv\Scripts\python -m pip install -r requirements-dev.txt`.
 
-For initial Python development, create an isolated environment with `python -m venv .venv` and activate it in PowerShell using `.\.venv\Scripts\Activate.ps1`. When adding runnable code, document dependency installation, launch commands, and the test command alongside its configuration.
+After each Python code change, run `.\.venv\Scripts\python scripts/typecheck.py` and resolve diagnostics before moving to the next change. During TDD, a newly added test may deliberately fail until its implementation is added; finish each slice with the type checker and `.\.venv\Scripts\python -m unittest discover -s tests -v` passing. If a check cannot run, report the blocker explicitly rather than treating it as passed.
+
+Use explicit annotations and control-flow checks to fix typing issues. Confine deliberate invalid-input casts to the relevant negative tests. Keep `pyrightconfig.json` shared with Pylance; preserve diagnostic coverage when fixing errors.
 
 ## Coding Style & Naming Conventions
 
@@ -27,7 +29,7 @@ Use four-space indentation for Python, `snake_case` for modules and functions, `
 
 ## Testing Guidelines
 
-No testing framework or coverage threshold is established. Add focused tests for folder parsing, original-release dates, conditional album artists, vinyl numbering, and release classification. Name test modules `test_<feature>.py`. Mock provider responses and use temporary copies for tag-writing tests. Verify artwork is at least 1000 × 1000 pixels and strictly below 5 MB.
+Tests use standard-library `unittest`; no coverage threshold is established. Add focused tests for folder parsing, original-release dates, conditional album artists, vinyl numbering, and release classification. Name test modules `test_<feature>.py`. Mock provider responses and use temporary copies for tag-writing tests. Verify artwork is at least 1000 × 1000 pixels and strictly below 5,000,000 bytes.
 
 ## Commit & Pull Request Guidelines
 
