@@ -3,6 +3,9 @@
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import stat
+from types import MappingProxyType
+from typing import Mapping
 
 from mutagen import MutagenError
 from mutagen.flac import FLAC
@@ -27,11 +30,29 @@ FLAC_FIELDS = {
 
 
 @dataclass(frozen=True)
+class FileState:
+    device: int
+    identity: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+    mode: int
+
+
+def file_state(path: Path) -> FileState:
+    info = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"Expected a regular file: {path}")
+    return FileState(info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+
+
+@dataclass(frozen=True)
 class LocalRelease:
     root: Path
     files: tuple[LocalFile, ...]
     selected_file_ids: frozenset[str]
     warnings: tuple[str, ...]
+    file_states: Mapping[str, FileState]
 
 
 def _disc_folder(path: Path) -> bool:
@@ -41,10 +62,13 @@ def _disc_folder(path: Path) -> bool:
     ))
 
 
-def _read_file(path: Path, root: Path) -> LocalFile:
+def _read_file(path: Path, root: Path) -> tuple[LocalFile, FileState]:
     file_id = path.relative_to(root).as_posix()
     try:
+        before = file_state(path)
         audio = FLAC(str(path))
+        if before != file_state(path):
+            raise ValueError(f"{file_id} changed during inspection. Refresh the review.")
     except (MutagenError, OSError) as exc:
         raise ValueError(f"Could not inspect {file_id}: {exc}") from exc
 
@@ -56,7 +80,7 @@ def _read_file(path: Path, root: Path) -> LocalFile:
                 tags[field] = present[0]
             elif present:
                 tags[field] = tuple(value for values in present for value in values)
-    return LocalFile(file_id, tags)
+    return LocalFile(file_id, tags), before
 
 
 def inspect_release(paths: list[Path], release_folder: Path | None = None) -> LocalRelease:
@@ -105,7 +129,8 @@ def inspect_release(paths: list[Path], release_folder: Path | None = None) -> Lo
         outside = ", ".join(str(path) for path in sorted(selected - candidates))
         raise ValueError(f"Selected files outside the proposed release: {outside}")
 
-    files = tuple(_read_file(path, root) for path in sorted(candidates))
+    inspected = tuple(_read_file(path, root) for path in sorted(candidates))
+    files = tuple(file for file, _ in inspected)
     for field in ("%ALBUM%", "%ALBUM ARTIST%"):
         values = {
             value.strip().casefold() for file in files for value in file.tags.get(field, ())
@@ -113,4 +138,7 @@ def inspect_release(paths: list[Path], release_folder: Path | None = None) -> Lo
         }
         if len(values) > 1:
             warnings.append(f"Possible unrelated files: existing {field} values differ across the proposed release.")
-    return LocalRelease(root, files, frozenset(path.relative_to(root).as_posix() for path in selected), tuple(warnings))
+    return LocalRelease(
+        root, files, frozenset(path.relative_to(root).as_posix() for path in selected), tuple(warnings),
+        MappingProxyType({file.file_id: state for file, state in inspected}),
+    )

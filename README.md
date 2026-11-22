@@ -30,8 +30,8 @@ linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
 given inputs. Discogs search, automatic matching, reissue content comparison,
-artist credits, classification, non-vinyl numbering, artwork, the editable review
-window, and file writes are pending.
+artist credits, classification, non-vinyl numbering, artwork, and the editable
+review window are pending.
 
 ## Preview one release (PowerShell)
 
@@ -63,6 +63,28 @@ $releaseUrl = Read-Host 'Paste the URL of the Discogs edition'
 Repeat `--accept-style` for each Discogs style accepted for this preview. Dates
 stay unresolved until the relationship between edition and original release
 content is established. The CLI preview does not modify any files.
+
+## FLAC writer
+
+`core.tag_writer.apply_metadata(local, proposal, approved)` takes the original
+snapshot from `inspect_release`, the proposal shown for review, and the exact
+`FieldDecision` records approved by the caller. Linked release-wide decisions
+must be approved together. The writer stages changes beside each original,
+reopens and verifies the FLAC, checks the original's file state again, then
+replaces it. Results report individual changed, failed, and skipped fields and
+flag release-wide inconsistencies after partial application.
+
+The current writer uses FLAC Vorbis comments `DATE`, `RELEASE DATE`, `GENRE`,
+`TRACKNUMBER`, `TOTALTRACKS`, `DISCNUMBER`, `TOTALDISCS`, `VINYLSIDE`, and
+`VINYLTRACKNUMBER` for the implemented rules. It recognizes `TRACKTOTAL` and
+`DISCTOTAL` as aliases and removes them when an approved change replaces or
+deletes their logical field. The mappings have been round-tripped with Mutagen
+on disposable FLACs. Checking them in foobar2000 remains pending.
+
+After an interruption, `find_staged_files(local)` lists temporary copies for
+inspection once the application has stopped. The writer API is ready for a
+review UI to request approval, display per-field outcomes, and refresh stale
+comparisons. The terminal preview remains read-only.
 
 ## Development (PowerShell)
 
