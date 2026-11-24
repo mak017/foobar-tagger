@@ -12,7 +12,7 @@ def release_context(sources, files=None, selected=None, complete=True):
     return ReleaseContext(
         files=files,
         selected_file_ids=frozenset(selected if selected is not None else (f.file_id for f in files)),
-        edition=Edition("discogs", "123", "WEB", (
+        edition=Edition("discogs", "123", "", (
             EditionTrack("ta", "1"), EditionTrack("tb", "2"),
         ), True, genre_sources=sources),
         track_mapping={"a": "ta", "b": "tb"},

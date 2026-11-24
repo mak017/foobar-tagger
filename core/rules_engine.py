@@ -8,6 +8,7 @@ import re
 
 from core.artist_credits import ArtistCredit, RenderedCredit, credit_source, credits_differ, is_various, render_artist_credit
 from core.release_classification import ReleaseTypeEvidence, classify_release
+from core.track_positions import DISC_MEDIA, parse_disc_position
 
 
 class InvalidProposalInput(ValueError):
@@ -85,6 +86,7 @@ class Edition:
     release_title: str | None = None
     artist_credits: tuple[ArtistCredit, ...] | None = None
     release_type_evidence: ReleaseTypeEvidence | None = None
+    disc_count: int | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "tracks", tuple(self.tracks))
@@ -324,6 +326,103 @@ def _valid_release_date(value: object) -> bool:
     return True
 
 
+_TRACK_FIELDS = ("%TRACKNUMBER%", "%TOTALTRACKS%")
+_DISC_FIELDS = ("%DISCNUMBER%", "%TOTALDISCS%")
+
+
+def _disc_layout(edition: Edition) -> tuple[dict[str, tuple[int, int]], dict[int, int]] | None:
+    positions: dict[str, tuple[int, int]] = {}
+    track_numbers: dict[int, set[int]] = {}
+    implicit_disc = False
+    for track in edition.tracks:
+        position = parse_disc_position(track.position, edition.media_type)
+        if position is None:
+            return None
+        disc, number = position
+        if disc is None:
+            implicit_disc = True
+            disc = 1
+        numbers = track_numbers.setdefault(disc, set())
+        if number in numbers:
+            return None
+        numbers.add(number)
+        positions[track.track_id] = (disc, number)
+
+    disc_count = len(track_numbers)
+    if (
+        not disc_count or (implicit_disc and disc_count > 1)
+        or (edition.disc_count is not None and edition.disc_count != disc_count)
+        or sorted(track_numbers) != list(range(1, disc_count + 1))
+    ):
+        return None
+    if any(sorted(numbers) != list(range(1, len(numbers) + 1)) for numbers in track_numbers.values()):
+        return None
+    return positions, {disc: len(numbers) for disc, numbers in track_numbers.items()}
+
+
+def _propose_disc_web_numbering(
+    context: ReleaseContext, decisions: list[FieldDecision], issues: list[ReviewIssue], approval_groups: list[ApprovalGroup],
+) -> None:
+    edition = context.edition
+    web = edition.media_type == "WEB"
+    layout = _disc_layout(edition) if not web and edition.tracklist_complete else None
+    tracks = {track.track_id: (ordinal, track) for ordinal, track in enumerate(edition.tracks, 1)}
+    fields = (*_TRACK_FIELDS, *_DISC_FIELDS)
+    for file in context.files:
+        if file.file_id not in context.selected_file_ids:
+            continue
+        mapped = context.track_mapping.get(file.file_id)
+        targets: dict[str, str | None] = {}
+        evidence = Evidence(edition.provider, edition.release_id, None)
+        reason = "Confirm a provider track mapping before changing this file."
+        issue_code = "MAPPING_REQUIRED"
+        options = ("manual_mapping", "skip")
+        if mapped is not None:
+            ordinal, track = tracks[mapped]
+            evidence = Evidence(edition.provider, edition.release_id, track.position or None)
+            reason = "A complete edition tracklist is required to establish numbering and totals."
+            issue_code = "INCOMPLETE_TRACKLIST"
+            options = ("complete_tracklist", "skip")
+            if web:
+                targets.update(dict.fromkeys(_DISC_FIELDS))
+                if edition.tracklist_complete:
+                    targets.update(zip(_TRACK_FIELDS, (str(ordinal), str(len(edition.tracks)))))
+            elif layout is not None:
+                positions, totals = layout
+                disc, number = positions[mapped]
+                targets.update(zip(_TRACK_FIELDS, (str(number), str(totals[disc]))))
+                targets.update(zip(_DISC_FIELDS, (str(disc), str(len(totals))) if len(totals) > 1 else (None, None)))
+            elif edition.tracklist_complete:
+                reason = "The edition positions or carrier count do not establish consecutive track numbers and disc totals."
+                issue_code = "DISC_LAYOUT_UNRESOLVED"
+                options = ("review_edition", "skip")
+
+        unresolved = tuple(field for field in fields if field not in targets)
+        if unresolved:
+            issues.append(ReviewIssue(issue_code, reason, (file.file_id,), unresolved, options))
+        disc_changes: list[tuple[str, str, tuple[str, ...] | None]] = []
+        for field in fields:
+            existing = file.tags.get(field)
+            if field not in targets:
+                decisions.append(FieldDecision(file.file_id, field, existing, None, "UNRESOLVED", evidence, reason))
+                continue
+            target = targets[field]
+            values = (target,) if target is not None else None
+            state = "KEEP" if existing == values else "DELETE" if values is None else "SET"
+            if field in _DISC_FIELDS:
+                note = "Use the verified disc number and full edition disc count."
+                if target is None:
+                    note = "Remove disc tags from this WEB edition." if web else "Remove disc tags from this single-disc edition."
+                if state in ("SET", "DELETE"):
+                    disc_changes.append((file.file_id, field, values))
+            else:
+                note = ("Use the track order and total across the complete WEB edition." if web else
+                        "Use the track number and total on this disc of the complete edition.")
+            decisions.append(FieldDecision(file.file_id, field, existing, values, state, evidence, note))
+        if len(disc_changes) == 2:
+            approval_groups.append(ApprovalGroup("%DISCNUMBER%", (file.file_id,), (), tuple(disc_changes)))
+
+
 def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> MetadataProposal:
     """Return review decisions without reading or writing files."""
     edition = context.edition
@@ -502,6 +601,9 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
         changed = tuple(d.file_id for d in decisions if d.field == "%GENRE%" and d.state == "SET")
         if changed and value is not None:
             approval_groups.append(ApprovalGroup("%GENRE%", changed, value))
+    if edition.media_type in DISC_MEDIA or edition.media_type == "WEB":
+        evaluated_rules.append("web_numbering" if edition.media_type == "WEB" else "disc_numbering")
+        _propose_disc_web_numbering(context, decisions, issues, approval_groups)
     if edition.media_type not in ("Vinyl", "LP"):
         return MetadataProposal(tuple(decisions), tuple(issues), tuple(evaluated_rules), tuple(approval_groups))
     evaluated_rules.append("vinyl_numbering")

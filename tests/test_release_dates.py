@@ -12,7 +12,7 @@ def date_context(dates, files=None, selected=None, complete=True):
     return ReleaseContext(
         files=files,
         selected_file_ids=frozenset(selected if selected is not None else (f.file_id for f in files)),
-        edition=Edition("discogs", "edition", "WEB", (
+        edition=Edition("discogs", "edition", "", (
             EditionTrack("ta", "1"), EditionTrack("tb", "2"),
         ), True, dates=dates),
         track_mapping={"a": "ta", "b": "tb"},

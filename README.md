@@ -30,7 +30,7 @@ vocabulary validation and selection consistency. Genre changes are returned in
 linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
-given inputs. Reissue content comparison and non-vinyl numbering are pending. The artwork
+given inputs. Reissue content comparison is pending. The artwork
 window previews covers and applies separately approved folder or embedded artwork.
 
 ## Review and apply metadata (PowerShell)
@@ -80,11 +80,16 @@ evidence. The review shows the reason and source before approval.
 
 Use **Edit date** and **Edit styles** to update the release-wide values. The
 existing and proposed values appear side by side, with source evidence and
-unresolved issues below the table. The vinyl numbering rules use the chosen
-track positions and full tracklist.
+unresolved issues below the table. CD and DVD track numbers restart on each
+disc, and the total includes every track on that disc. Multi-disc editions
+also receive disc numbers and the full disc count. WEB and vinyl track numbers
+and totals use the full release. The review proposes removing existing disc tags
+from single-disc CD/DVD, WEB, and vinyl files. Incomplete tracklists and ambiguous
+CD/DVD positions leave the affected numbering fields unresolved.
 
 Use the checkboxes or Space to approve individual changes. Linked date and
-genre changes are selected together, and editing the inputs clears approvals.
+genre changes are selected together. When both disc tags change on a CD, DVD,
+or WEB file, the two changes are approved together. Editing the inputs clears approvals.
 **Apply approved** asks for confirmation, displays each field's outcome, and
 refreshes the comparison. [Review window screenshot](docs/review-window.jpg)
 

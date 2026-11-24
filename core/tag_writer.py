@@ -77,7 +77,8 @@ def _validate_approval(
             accepted[file_id, field].proposed_values != values for file_id, field, values in members
         ):
             raise InvalidApproval(f"Approve the complete linked changes for {group.field}, or leave them all unchecked.")
-        groups[group.field] = keys
+        if group.field in RELEASE_FIELDS:
+            groups[group.field] = keys
 
     for group_field, fields in RELEASE_FIELDS.items():
         if any(key[1] in fields and key not in groups.get(group_field, ()) for key in accepted):

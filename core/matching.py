@@ -9,11 +9,11 @@ from typing import Literal
 from unicodedata import normalize
 
 from core.rules_engine import Edition, EditionTrack, LocalFile, ReleaseContext
+from core.track_positions import DISC_MEDIA, parse_disc_position
 
 
 MAX_DURATION_DIFFERENCE = 5
 VINYL_MEDIA = frozenset({"Vinyl", "LP"})
-DISC_MEDIA = frozenset({"CD", "DVD"})
 _BRACKETED = re.compile(r"^(.+?)\s*(?:\(([^()]+)\)|\[([^\[\]]+)\])$")
 _VERSION_WORD = re.compile(r"\b(?:mix|remix|edit|version|dub|rework|instrumental|vocal|remaster(?:ed)?|live|acoustic|vip)\b")
 _FILE_PREFIX = re.compile(r"^(\d{1,2}[-.]\d{1,3}|[a-z]{1,2}\d{0,3}|\d{1,3})([ ._\-]+)(\S.*)$", re.IGNORECASE)
@@ -75,7 +75,7 @@ def _positive_number(value: str) -> str | None:
     return None
 
 
-def _position_parts(value: str, media: str) -> dict[str, str]:
+def _position_parts(value: str, media: str, *, from_filename: bool = False) -> dict[str, str]:
     value = value.strip().upper()
     if media in VINYL_MEDIA:
         side = re.fullmatch(r"([A-Z]+)([0-9]{1,4})?", value)
@@ -85,17 +85,22 @@ def _position_parts(value: str, media: str) -> dict[str, str]:
                 result["within_side"] = within
             return result
     if media in DISC_MEDIA:
-        disc = re.fullmatch(r"([0-9]{1,4})[.-]([0-9]{1,4})", value)
+        if from_filename:
+            value = value.replace(".", "-")
+        position = parse_disc_position(value, media)
+        if position is None:
+            return {}
+        disc, track = position
+        result = {"track": str(track)}
         if disc is not None:
-            disc_number, track_number = _positive_number(disc[1]), _positive_number(disc[2])
-            if disc_number is not None and track_number is not None:
-                return {"disc": disc_number, "track": track_number}
+            result["disc"] = str(disc)
+        return result
     track_number = _positive_number(value)
     return {"track": track_number} if track_number is not None else {}
 
 
 def _local_positions(file: LocalFile, filename_position: str, media: str) -> dict[str, set[str]]:
-    result = {key: {value} for key, value in _position_parts(filename_position, media).items()}
+    result = {key: {value} for key, value in _position_parts(filename_position, media, from_filename=True).items()}
     fields = {"%TRACKNUMBER%": "track"}
     if media in DISC_MEDIA:
         fields["%DISCNUMBER%"] = "disc"
@@ -115,6 +120,8 @@ def _local_positions(file: LocalFile, filename_position: str, media: str) -> dic
 
 
 def _edition_positions(edition: Edition, track: EditionTrack, ordinal: int) -> dict[str, str]:
+    if edition.media_type == "WEB" and edition.tracklist_complete:
+        return {"track": str(ordinal)}
     positions = _position_parts(track.position, edition.media_type)
     if edition.media_type in VINYL_MEDIA and edition.tracklist_complete:
         positions.setdefault("track", str(ordinal))

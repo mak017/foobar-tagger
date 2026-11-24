@@ -11,6 +11,7 @@ from urllib import request
 from core.artist_credits import ArtistCredit
 from core.release_classification import ReleaseTypeEvidence
 from core.rules_engine import DateSource, Edition, EditionTrack, GenreSource, ReleaseDates
+from core.track_positions import DISC_MEDIA
 
 
 @dataclass(frozen=True)
@@ -283,6 +284,7 @@ def load_release(url: str) -> DiscogsRelease:
         ))
 
     formats = data.get("formats")
+    media = _media_type(formats)
     styles = data.get("styles")
     genre_sources = ()
     if isinstance(styles, list) and styles and all(isinstance(style, str) and style.strip() for style in styles):
@@ -296,10 +298,11 @@ def load_release(url: str) -> DiscogsRelease:
         date_source = DateSource("discogs", release_id, str(year))
 
     edition = Edition(
-        "discogs", release_id, _media_type(formats), tuple(tracks), complete and bool(tracks),
+        "discogs", release_id, media, tuple(tracks), complete and bool(tracks),
         genre_sources=genre_sources, dates=ReleaseDates(edition_date=date_source),
         release_title=title, artist_credits=_artist_credits(data.get("artists")),
         release_type_evidence=_release_type_evidence(formats, data.get("extraartists")),
+        disc_count=_disc_count(formats, media),
     )
     return DiscogsRelease(title, edition, _release_images(data.get("images")))
 
@@ -308,11 +311,14 @@ def _media_type(formats: object) -> str:
     if not isinstance(formats, list) or not formats:
         return ""
     media_types: set[str] = set()
+    has_container = False
     for item in formats:
         if not isinstance(item, dict):
             return ""
         name, descriptions = item.get("name"), item.get("descriptions")
-        if name == "Vinyl" and isinstance(descriptions, list) and "LP" in descriptions:
+        if name in ("Box Set", "All Media"):
+            has_container = True
+        elif name == "Vinyl" and isinstance(descriptions, list) and "LP" in descriptions:
             media_types.add("LP")
         elif name == "File":
             media_types.add("WEB")
@@ -320,6 +326,24 @@ def _media_type(formats: object) -> str:
             media_types.add(name)
         else:
             return ""
+    if not media_types or (has_container and not media_types <= DISC_MEDIA):
+        return ""
     if media_types <= {"Vinyl", "LP"}:
         return "Vinyl" if "Vinyl" in media_types else "LP"
     return next(iter(media_types)) if len(media_types) == 1 else ""
+
+
+def _disc_count(formats: object, media: str) -> int | None:
+    if media not in DISC_MEDIA or not isinstance(formats, list):
+        return None
+    count = 0
+    for item in formats:
+        if not isinstance(item, dict) or item.get("name") != media:
+            continue
+        quantity = item.get("qty")
+        if isinstance(quantity, str) and re.fullmatch(r"[0-9]{1,4}", quantity):
+            quantity = int(quantity)
+        if type(quantity) is not int or quantity < 1:
+            return None
+        count += quantity
+    return count or None
