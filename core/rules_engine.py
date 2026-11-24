@@ -7,6 +7,7 @@ from typing import Mapping
 import re
 
 from core.artist_credits import ArtistCredit, RenderedCredit, credit_source, credits_differ, is_various, render_artist_credit
+from core.release_classification import ReleaseTypeEvidence, classify_release
 
 
 class InvalidProposalInput(ValueError):
@@ -83,6 +84,7 @@ class Edition:
     dates: ReleaseDates | None = None
     release_title: str | None = None
     artist_credits: tuple[ArtistCredit, ...] | None = None
+    release_type_evidence: ReleaseTypeEvidence | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "tracks", tuple(self.tracks))
@@ -107,6 +109,7 @@ class ReleaseContext:
     membership_complete: bool = False
     manual_genres: tuple[str, ...] | None = None
     manual_date: ManualDate | None = None
+    manual_release_type: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "files", tuple(self.files))
@@ -190,6 +193,17 @@ def _credited_text(source: str | None, reason: str, missing: str) -> _CreditValu
     return _CreditValue((value,), source, reason) if value else _CreditValue(None, source, missing, True)
 
 
+def _is_various_edition(edition: Edition) -> bool:
+    artists = edition.artist_credits
+    return bool(artists and len(artists) == 1 and is_various(artists[0], edition.provider))
+
+
+def _track_credit_sources(edition: Edition) -> tuple[bool, dict[str, tuple[ArtistCredit, ...] | None]]:
+    inherit = (edition.provider == "discogs" and edition.tracklist_complete
+               and all(track.artist_credits is None for track in edition.tracks))
+    return inherit, {track.track_id: edition.artist_credits if inherit else track.artist_credits for track in edition.tracks}
+
+
 def _album_artist(
     edition: Edition, artists: dict[str, RenderedCredit | None], artist_sources: dict[str, tuple[str, ...] | None],
 ) -> _CreditValue:
@@ -202,7 +216,7 @@ def _album_artist(
             return _CreditValue(None, release_source, "Some track artists are missing. The available credits do not establish album artist.", True)
         return _CreditValue(None, artist_sources[edition.tracks[0].track_id],
                             "All tracks in the complete edition have the same artist credit. Remove the album artist.")
-    if edition.artist_credits and len(edition.artist_credits) == 1 and is_various(edition.artist_credits[0], edition.provider):
+    if _is_various_edition(edition):
         return _CreditValue(("Various",), release_source, "Track credits differ and the edition is credited to Various.")
     release_credit = render_artist_credit(edition.artist_credits, edition.provider)
     if release_credit is None:
@@ -216,9 +230,7 @@ def _propose_credited_fields(
 ) -> None:
     edition = context.edition
     tracks = {track.track_id: track for track in edition.tracks}
-    inherit = (edition.provider == "discogs" and edition.tracklist_complete
-               and all(track.artist_credits is None for track in edition.tracks))
-    raw_credits = {track.track_id: edition.artist_credits if inherit else track.artist_credits for track in edition.tracks}
+    inherit, raw_credits = _track_credit_sources(edition)
     artists = {key: render_artist_credit(credit, edition.provider) for key, credit in raw_credits.items()}
     sources = {key: credit_source(credit) for key, credit in raw_credits.items()}
     album = _credited_text(edition.release_title, "Use the title of the matched edition.", "The edition title is unavailable.")
@@ -256,6 +268,46 @@ def _propose_credited_fields(
                 state = "KEEP" if existing == value.values else "DELETE" if value.values is None else "SET"
             decisions.append(FieldDecision(file.file_id, field, existing, value.values, state,
                                            Evidence(edition.provider, edition.release_id, value.source), value.reason))
+
+
+def _propose_release_type(
+    context: ReleaseContext, decisions: list[FieldDecision], issues: list[ReviewIssue],
+) -> None:
+    edition = context.edition
+    track_count = len(edition.tracks) if edition.tracklist_complete else None
+    durations = tuple(track.duration_seconds for track in edition.tracks)
+    duration = (sum(value for value in durations if value is not None)
+                if track_count and all(value is not None and value > 0 for value in durations) else None)
+    various = _is_various_edition(edition)
+    single_artist = False
+    if track_count and track_count > 6 and not various:
+        _, sources = _track_credit_sources(edition)
+        artists = tuple(artist for source in sources.values()
+                        if (artist := render_artist_credit(source, edition.provider)) is not None and len(artist.identities) == 1)
+        if len(artists) == track_count:
+            identities = {artist.identities[0] for artist in artists}
+            single_artist = len(identities) == 1 if None not in identities else not credits_differ(artists)
+    classification = classify_release(
+        edition.release_type_evidence or ReleaseTypeEvidence(), track_count=track_count, duration_seconds=duration,
+        single_artist=single_artist, various_artists=various, manual=context.manual_release_type,
+    )
+    evidence = Evidence("manual" if context.manual_release_type is not None else edition.provider,
+                        edition.release_id, classification.source)
+    for file in context.files:
+        if file.file_id not in context.selected_file_ids:
+            continue
+        field = "%RELEASETYPE%"
+        existing = file.tags.get(field)
+        candidate = (classification.value,) if classification.value is not None else None
+        reason = classification.reason
+        if file.file_id not in context.track_mapping:
+            candidate = None
+            reason = "Confirm a track mapping before changing the release type on this file."
+            issues.append(ReviewIssue("RELEASE_TYPE_MAPPING_REQUIRED", reason, (file.file_id,), (field,), ("manual_mapping", "skip")))
+        elif candidate is None:
+            issues.append(ReviewIssue("RELEASE_TYPE_REQUIRED", reason, (file.file_id,), (field,), ("select_release_type", "skip")))
+        state = "UNRESOLVED" if candidate is None else "KEEP" if candidate == existing else "SET"
+        decisions.append(FieldDecision(file.file_id, field, existing, candidate, state, evidence, reason))
 
 
 def _valid_release_date(value: object) -> bool:
@@ -304,6 +356,9 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
             or any(track.title or track.artist_credits is not None for track in edition.tracks)):
         evaluated_rules.append("credited_metadata")
         _propose_credited_fields(context, decisions, issues)
+    if edition.release_type_evidence is not None or context.manual_release_type is not None:
+        evaluated_rules.append("release_type")
+        _propose_release_type(context, decisions, issues)
     if edition.dates is not None or context.manual_date is not None:
         evaluated_rules.append("release_dates")
         dates = edition.dates or ReleaseDates()

@@ -9,6 +9,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib import request
 
 from core.artist_credits import ArtistCredit
+from core.release_classification import ReleaseTypeEvidence
 from core.rules_engine import DateSource, Edition, EditionTrack, GenreSource, ReleaseDates
 
 
@@ -223,6 +224,28 @@ def _artist_credits(entries: object) -> tuple[ArtistCredit, ...] | None:
     return tuple(artists)
 
 
+def _release_type_evidence(formats: object, credits: object) -> ReleaseTypeEvidence:
+    descriptions = []
+    edition_descriptions: list[str] = []
+    if isinstance(formats, list):
+        for row in formats:
+            if isinstance(row, dict):
+                labels = _text_list(row.get("descriptions"))
+                if _text(row.get("name")).casefold() in ("all media", "box set"):
+                    edition_descriptions.extend(labels)
+                else:
+                    descriptions.append(labels)
+    mixing_credit = None
+    if isinstance(credits, list):
+        for credit in credits:
+            if isinstance(credit, dict) and _text(credit.get("role")).casefold() == "dj mix":
+                tracks = credit.get("tracks")
+                if tracks is None or (isinstance(tracks, str) and not tracks.strip()):
+                    mixing_credit = _text(credit.get("role"))
+                    break
+    return ReleaseTypeEvidence(tuple(descriptions), mixing_credit, tuple(edition_descriptions))
+
+
 def load_release(url: str) -> DiscogsRelease:
     parsed = urlsplit(url.strip())
     release_match = None
@@ -276,6 +299,7 @@ def load_release(url: str) -> DiscogsRelease:
         "discogs", release_id, _media_type(formats), tuple(tracks), complete and bool(tracks),
         genre_sources=genre_sources, dates=ReleaseDates(edition_date=date_source),
         release_title=title, artist_credits=_artist_credits(data.get("artists")),
+        release_type_evidence=_release_type_evidence(formats, data.get("extraartists")),
     )
     return DiscogsRelease(title, edition, _release_images(data.get("images")))
 

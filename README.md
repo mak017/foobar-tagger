@@ -13,7 +13,8 @@ show the tracklist, accept explicit mappings, and print a read-only proposal wit
 existing values, proposed changes, source evidence, and unresolved fields.
 
 The pure `core.rules_engine.propose_metadata(context, policy)` function implements
-credited metadata, vinyl/LP numbering, release-wide genres, and release-wide dates. Vinyl supports continuous release numbering,
+credited metadata, release classification, vinyl/LP numbering, release-wide genres,
+and release-wide dates. Vinyl supports continuous release numbering,
 full-release totals, separate side/within-side values, explicit disc-tag deletion,
 unchanged values, partial selections, unresolved mappings/positions, incomplete
 tracklists, and structural identity validation. Decisions include source evidence
@@ -29,8 +30,7 @@ vocabulary validation and selection consistency. Genre changes are returned in
 linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
-given inputs. Reissue content comparison, classification, and non-vinyl
-numbering are pending. The artwork
+given inputs. Reissue content comparison and non-vinyl numbering are pending. The artwork
 window previews covers and applies separately approved folder or embedded artwork.
 
 ## Review and apply metadata (PowerShell)
@@ -69,6 +69,14 @@ edition even when you select one file. Identical credits on every track propose
 an explicit deletion. Differing known credits use the main release artist or
 exactly `Various` for a various-artists edition. Missing track credits remain
 unresolved when the source supplies separate track artists. [Artist guidelines](https://support.discogs.com/hc/en-us/articles/360005054753-Database-Guidelines-2-Artist) [Tracklisting guidelines](https://support.discogs.com/hc/en-us/articles/360005055373-Database-Guidelines-12-Tracklisting) [Credit review screenshot](docs/credited-metadata.jpg)
+
+Release Type uses the selected edition's explicit Discogs format descriptions
+and edition-wide DJ Mix credits when they establish one supported type. With no
+explicit type, the proposal uses the full tracklist's count, duration, and artist
+credits as fallback evidence. Conflicting or uncovered cases remain unresolved.
+Use **Edit type** to select any of the 14 values in the plan or return to edition
+evidence. The review shows the reason and source before approval.
+[Discogs format guidelines](https://support.discogs.com/hc/en-us/articles/360005006654-Database-Guidelines-6-Format) [Release classification screenshot](docs/release-classification.jpg)
 
 Use **Edit date** and **Edit styles** to update the release-wide values. The
 existing and proposed values appear side by side, with source evidence and
@@ -154,7 +162,7 @@ replaces it. Results report individual changed, failed, and skipped fields and
 flag release-wide inconsistencies after partial application.
 
 The current writer uses FLAC Vorbis comments `ARTIST`, `TITLE`, `ALBUM`,
-`ALBUMARTIST`, `DATE`, `RELEASE DATE`, `GENRE`, `TRACKNUMBER`, `TOTALTRACKS`,
+`ALBUMARTIST`, `RELEASETYPE`, `DATE`, `RELEASE DATE`, `GENRE`, `TRACKNUMBER`, `TOTALTRACKS`,
 `DISCNUMBER`, `TOTALDISCS`, `VINYLSIDE`, and `VINYLTRACKNUMBER` for the
 implemented rules. It recognizes `ALBUM ARTIST`, `TRACKTOTAL`, and `DISCTOTAL`
 as aliases and removes them when an approved change replaces or

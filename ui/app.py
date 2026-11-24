@@ -12,6 +12,7 @@ from typing import TypeVar
 from core.clue_parser import parse_folder_clues
 from core.flac_input import LocalRelease, inspect_release
 from core.matching import MAX_DURATION_DIFFERENCE, TrackEvidence, TrackSuggestion, suggest_track_mappings
+from core.release_classification import VALID_RELEASE_TYPES
 from core.rules_engine import ManualDate, MetadataPolicy, ReleaseContext, propose_metadata
 from core.tag_writer import ApplyResult, apply_metadata, find_staged_files
 from providers.discogs import DiscogsRelease, ReleaseCandidate, load_release
@@ -52,6 +53,7 @@ class ReviewWindow:
         self.suggestions: dict[str, TrackSuggestion] = {}
         self.manual_date: ManualDate | None = None
         self.manual_styles: tuple[str, ...] | None = None
+        self.manual_release_type: str | None = None
         self.policy = MetadataPolicy(accepted_styles=accepted_styles)
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.busy = False
@@ -167,6 +169,8 @@ class ReviewWindow:
         self.artwork_button.pack(side="right")
         self.styles_button = ttk.Button(review_bar, text="Edit styles…", command=self._edit_styles)
         self.styles_button.pack(side="right", padx=(0, 6))
+        self.type_button = ttk.Button(review_bar, text="Edit type…", command=self._edit_release_type)
+        self.type_button.pack(side="right", padx=(0, 6))
         self.date_button = ttk.Button(review_bar, text="Edit date…", command=self._edit_date)
         self.date_button.pack(side="right", padx=(0, 6))
         self.diff = DiffTable(review)
@@ -222,6 +226,7 @@ class ReviewWindow:
             (self.confirm_button, local), (self.refresh_button, local_available),
             (self.toggle_file_button, local and bool(self.file_tree.selection())),
             (self.artwork_button, local), (self.styles_button, editing), (self.date_button, editing),
+            (self.type_button, editing),
             (self.approve_button, editing and bool(approval and approval.decisions)),
             (self.clear_button, editing and bool(approved)), (self.apply_button, editing and bool(approved)),
         ):
@@ -288,7 +293,7 @@ class ReviewWindow:
             self.needs_refresh = False
             self.release = None
             self.mapping.clear()
-            self.manual_date = self.manual_styles = None
+            self.manual_date = self.manual_styles = self.manual_release_type = None
             self.confirmed.set(False)
             self.status.set("Confirm which files belong to this release.")
             staged = find_staged_files(local)
@@ -473,7 +478,7 @@ class ReviewWindow:
         if self.release is not None:
             self.release = None
             self.mapping.clear()
-            self.manual_date = self.manual_styles = None
+            self.manual_date = self.manual_styles = self.manual_release_type = None
             self._show_files()
         self._rebuild()
 
@@ -503,7 +508,7 @@ class ReviewWindow:
             return
         self.release = None
         self.mapping.clear()
-        self.manual_date = self.manual_styles = None
+        self.manual_date = self.manual_styles = self.manual_release_type = None
         self._show_files()
         self._rebuild()
 
@@ -536,7 +541,8 @@ class ReviewWindow:
                 cues.append(f"Folder album: {clues.album}")
             self.edition_text.set("  |  ".join(cues))
             context = ReleaseContext(local.files, local.selected_file_ids, edition, self.mapping, membership_complete=True,
-                                     manual_genres=self.manual_styles, manual_date=self.manual_date)
+                                     manual_genres=self.manual_styles, manual_date=self.manual_date,
+                                     manual_release_type=self.manual_release_type)
             try:
                 self.diff.show(propose_metadata(context, self.policy))
             except ValueError as exc:
@@ -553,6 +559,8 @@ class ReviewWindow:
                 self._edit_date()
             elif decision.field == "%GENRE%":
                 self._edit_styles()
+            elif decision.field == "%RELEASETYPE%":
+                self._edit_release_type()
 
     def _edit_date(self) -> None:
         if self.busy or self.release is None or not self.confirmed.get():
@@ -584,8 +592,21 @@ class ReviewWindow:
             self.status.set("Styles updated. Review the new proposal before applying.")
             self._rebuild()
 
-    def _edit(self, title: str, fields: tuple[tuple[str, str], ...],
-              checkbox: tuple[str, bool] | None = None) -> tuple[tuple[str, ...], bool] | None:
+    def _edit_release_type(self) -> None:
+        if self.busy or self._artwork_writing() or self.release is None or not self.confirmed.get():
+            return
+        automatic = "Use edition evidence"
+        current = self.manual_release_type or automatic
+        result = self._edit("Release type", (("Type for the selected edition", current),),
+                            choices=(automatic, *VALID_RELEASE_TYPES))
+        if result is not None:
+            (value,), _ = result
+            self.manual_release_type = None if value == automatic else value
+            self.status.set("Release type updated. Review the new proposal before applying.")
+            self._rebuild()
+
+    def _edit(self, title: str, fields: tuple[tuple[str, str], ...], checkbox: tuple[str, bool] | None = None,
+              *, choices: tuple[str, ...] | None = None) -> tuple[tuple[str, ...], bool] | None:
         dialog = tk.Toplevel(self.root, background=BACKGROUND)
         dialog.title(title)
         dialog.transient(self.root)
@@ -595,8 +616,12 @@ class ReviewWindow:
         entries: list[ttk.Entry] = []
         for label, value in fields:
             ttk.Label(body, text=label, wraplength=420).pack(anchor="w")
-            entry = ttk.Entry(body, width=57)
-            entry.insert(0, value)
+            if choices is not None:
+                entry = ttk.Combobox(body, state="readonly", values=choices, width=38)
+                entry.set(value)
+            else:
+                entry = ttk.Entry(body, width=57)
+                entry.insert(0, value)
             entry.pack(fill="x", pady=(4, 10))
             entries.append(entry)
         checked = tk.BooleanVar(master=dialog, value=checkbox[1] if checkbox else False)
