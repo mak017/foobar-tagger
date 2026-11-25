@@ -202,8 +202,10 @@ as aliases and removes them when an approved change replaces or
 deletes their logical field. The mappings have been round-tripped with Mutagen
 on disposable FLACs. Checking them in foobar2000 remains pending.
 
-After an interruption, the review window lists leftover temporary copies when
-the release is reopened. The terminal preview remains read-only.
+After an interruption, reopen the release and choose **Staging files**. Review
+the listed paths and explicitly approve removal of temporary copies from exited
+writers. Active, unidentifiable, or changed copies stay in place. The terminal
+preview remains read-only. [Staging cleanup screenshot](docs/staging-cleanup.jpg)
 
 ## Development (PowerShell)
 

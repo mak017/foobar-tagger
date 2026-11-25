@@ -17,7 +17,7 @@ from core.rules_engine import (
     EDITABLE_TEXT_FIELDS, MULTIVALUE_FIELDS, FieldDecision, ManualDate, ManualField, MetadataPolicy,
     ReleaseContext, propose_metadata,
 )
-from core.tag_writer import ApplyResult, apply_metadata, find_staged_files
+from core.tag_writer import ApplyResult, StagingReview, apply_metadata, cleanup_staging_files, review_staging_files
 from providers.discogs import DiscogsRelease, ReleaseCandidate, load_release
 from ui.artwork_panel import ArtworkWindow
 from ui.diff_table import DiffTable
@@ -66,6 +66,7 @@ class ReviewWindow:
         self.busy = False
         self.writing = False
         self.needs_refresh = False
+        self.staged = StagingReview((), ())
         self.path_text = tk.StringVar(master=root, value="Open a folder or select FLAC files.")
         self.scope_text = tk.StringVar(master=root, value="No release open")
         self.edition_text = tk.StringVar(master=root, value="Confirm the file grouping to load an edition.")
@@ -166,6 +167,9 @@ class ReviewWindow:
         warning_label = ttk.Label(local, textvariable=self.warnings, style="Panel.TLabel", foreground="#f3bd76",
                                   wraplength=284)
         warning_label.grid(row=9, column=0, sticky="ew", pady=(6, 0))
+        self.staging_button = ttk.Button(local, text="Staging files…", command=self._show_staging)
+        self.staging_button.grid(row=10, column=0, sticky="w", pady=(6, 0))
+        self.staging_button.grid_remove()
 
         review.columnconfigure(0, weight=1)
         review.rowconfigure(1, weight=1)
@@ -242,6 +246,7 @@ class ReviewWindow:
             (self.url_entry, not busy), (self.load_button, grouped and bool(self.url.get().strip())),
             (self.search_button, grouped),
             (self.confirm_button, local), (self.refresh_button, local_available),
+            (self.staging_button, local_available),
             (self.toggle_file_button, local and bool(self.file_tree.selection())),
             (self.artwork_button, local), (self.styles_button, editing), (self.date_button, editing),
             (self.type_button, editing),
@@ -316,10 +321,7 @@ class ReviewWindow:
             self._reset_edits()
             self.confirmed.set(False)
             self.status.set("Confirm which files belong to this release.")
-            staged = find_staged_files(local)
-            if staged:
-                self.status.set("Review leftover staging copies after confirming that no other write is active.")
-                self._report("Leftover staging files", "\n".join(str(path) for path in staged))
+            self._check_staging()
             self._show_files()
             self._rebuild()
 
@@ -348,10 +350,59 @@ class ReviewWindow:
             self.needs_refresh = False
             self.mapping = {file_id: track for file_id, track in self.mapping.items() if file_id in local.file_states}
             self.status.set("Files refreshed. Confirm the grouping and review any remaining changes.")
+            self._check_staging()
             self._show_files()
             self._rebuild()
 
         self._start("Refreshing file comparisons…", lambda: inspect_release([previous.root]), refreshed)
+
+    def _check_staging(self) -> None:
+        local = self.local
+        self.staged = StagingReview((), ())
+        if local is not None:
+            try:
+                self.staged = review_staging_files(local)
+            except (OSError, ValueError) as exc:
+                self.status.set(f"Could not check for staging files. {exc}")
+        if self.staged.removable or self.staged.other:
+            self.staging_button.grid()
+            self.status.set("Temporary copies found. Open Staging files to review them.")
+        else:
+            self.staging_button.grid_remove()
+
+    def _show_staging(self) -> None:
+        if self.busy or self._artwork_writing() or self.local is None:
+            return
+        self._check_staging()
+        local, staged = self.local, self.staged
+        if not staged.removable and not staged.other:
+            self.status.set("No temporary copies found.")
+            return
+        details: list[str] = []
+        if staged.removable:
+            details.extend(("Temporary copies from exited writers", *(str(path.relative_to(local.root)) for path, _, _ in staged.removable)))
+        if staged.other:
+            details.extend(("", "Other temporary files. The writer is active or its owner cannot be verified.",
+                            *(str(path.relative_to(local.root)) for path in staged.other)))
+
+        def confirm_cleanup() -> None:
+            if self.local is not local or self.busy or self._artwork_writing():
+                return
+            if not messagebox.askyesno("Remove temporary copies",
+                                       f"Remove the {len(staged.removable)} reviewed temporary copies from exited writers?",
+                                       default="no", parent=self.root):
+                return
+
+            def done(result: ApplyResult) -> None:
+                self._check_staging()
+                self._report("Staging cleanup results", "\n\n".join(
+                    f"{item.status.title()} · {item.file_id}\n{item.reason}" for item in result.fields
+                ))
+
+            self._start("Removing the reviewed temporary copies…", lambda: cleanup_staging_files(local, staged), done, writing=True)
+
+        action = ("Remove reviewed copies…", confirm_cleanup) if staged.removable else None
+        self._report("Staging files", "\n".join(details), action=action)
 
     def _show_files(self) -> None:
         local = self.local
@@ -767,7 +818,7 @@ class ReviewWindow:
         self._report("Metadata results", "\n".join(text))
         self._refresh()
 
-    def _report(self, title: str, body: str) -> None:
+    def _report(self, title: str, body: str, *, action: tuple[str, Callable[[], None]] | None = None) -> None:
         popup = tk.Toplevel(self.root, background=BACKGROUND)
         popup.title(title)
         popup.transient(self.root)
@@ -784,6 +835,14 @@ class ReviewWindow:
         details.configure(yscrollcommand=scroll.set)
         self._fill_text(details, body)
         ttk.Button(frame, text="Close", command=popup.destroy).grid(row=1, column=0, sticky="e", pady=(8, 0))
+        if action is not None:
+            label, callback = action
+
+            def invoke() -> None:
+                popup.destroy()
+                callback()
+
+            ttk.Button(frame, text=label, command=invoke).grid(row=1, column=0, sticky="w", pady=(8, 0))
         popup.bind("<Escape>", lambda _event: popup.destroy())
 
 

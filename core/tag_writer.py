@@ -5,6 +5,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import shutil
 from tempfile import mkstemp
 from threading import Lock
@@ -14,7 +15,7 @@ from mutagen import MutagenError
 from mutagen.flac import FLAC, Picture, VCFLACDict
 
 from core.cover_engine import FRONT_COVER_TYPE, PreparedCover, validate_prepared_cover
-from core.flac_input import FLAC_FIELDS, LocalRelease, directory_identity, file_state, inspect_release
+from core.flac_input import FLAC_FIELDS, FileState, LocalRelease, directory_identity, file_state, inspect_release
 from core.rules_engine import FieldDecision, MetadataProposal
 
 
@@ -43,6 +44,16 @@ class ApplyResult:
     fields: tuple[FieldResult, ...]
     inconsistent_fields: tuple[str, ...]
     warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class StagingReview:
+    removable: tuple[tuple[Path, FileState, tuple[int, int]], ...]
+    other: tuple[Path, ...]
+
+
+def staging_prefix() -> str:
+    return f"{STAGING_PREFIX}{os.getpid()}-"
 
 
 def _validate_approval(
@@ -125,7 +136,7 @@ def _write_file(
     *, front_cover: Picture | None = None,
 ) -> bool:
     _reviewed_path(local, file_id)
-    fd, name = mkstemp(prefix=STAGING_PREFIX, suffix=STAGING_SUFFIX, dir=path.parent)
+    fd, name = mkstemp(prefix=staging_prefix(), suffix=STAGING_SUFFIX, dir=path.parent)
     staged = Path(name)
     try:
         os.close(fd)
@@ -319,3 +330,74 @@ def find_staged_files(local: LocalRelease) -> tuple[Path, ...]:
         for path in directory.glob(f"{STAGING_PREFIX}*.tmp")
         if path.name.endswith((STAGING_SUFFIX, COVER_STAGING_SUFFIX)) and not path.is_symlink() and path.is_file()
     ))
+
+
+def _process_has_exited(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            pass
+        return False
+
+    # On Windows os.kill(pid, 0) can terminate the process. Open a wait-only handle instead.
+    from ctypes import WinDLL, get_last_error
+    from ctypes.wintypes import BOOL, DWORD, HANDLE
+
+    kernel = WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (DWORD, BOOL, DWORD)
+    kernel.OpenProcess.restype = HANDLE
+    kernel.WaitForSingleObject.argtypes = (HANDLE, DWORD)
+    kernel.WaitForSingleObject.restype = DWORD
+    kernel.CloseHandle.argtypes = (HANDLE,)
+    kernel.CloseHandle.restype = BOOL
+    handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if not handle:
+        return get_last_error() == 87  # ERROR_INVALID_PARAMETER: no such process
+    try:
+        return kernel.WaitForSingleObject(handle, 0) == 0  # WAIT_OBJECT_0
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def review_staging_files(local: LocalRelease) -> StagingReview:
+    """Identify recognizable temporary copies left by an exited writer."""
+    if directory_identity(local.root) != local.root_identity:
+        raise ValueError("The release folder changed after inspection. Refresh the review.")
+    removable: list[tuple[Path, FileState, tuple[int, int]]] = []
+    other: list[Path] = []
+    for path in find_staged_files(local):
+        owner = re.fullmatch(r"\.foobar-tagger-([1-9][0-9]{0,9})-[a-z0-9_]{8}\.(?:flac|cover)\.tmp", path.name)
+        pid = int(owner[1]) if owner else 0
+        if 0 < pid <= 2_147_483_647 and _process_has_exited(pid):
+            try:
+                removable.append((path, file_state(path), directory_identity(path.parent)))
+            except (OSError, ValueError):
+                other.append(path)
+        else:
+            other.append(path)
+    return StagingReview(tuple(removable), tuple(other))
+
+
+def cleanup_staging_files(local: LocalRelease, approved: StagingReview) -> ApplyResult:
+    """Remove only unchanged temporary copies from the explicitly reviewed snapshot."""
+    fields: list[FieldResult] = []
+    with _APPLICATION_LOCK:
+        current = set(review_staging_files(local).removable)
+        for item in approved.removable:
+            path, state, parent = item
+            try:
+                if (item not in current or directory_identity(path.parent) != parent
+                        or path.resolve(strict=True) != path or file_state(path) != state):
+                    fields.append(FieldResult(str(path), "Temporary copy", "skipped", "The reviewed copy is gone or changed."))
+                    continue
+                path.unlink()
+            except FileNotFoundError:
+                fields.append(FieldResult(str(path), "Temporary copy", "skipped", "The copy is already gone."))
+            except (OSError, ValueError) as exc:
+                fields.append(FieldResult(str(path), "Temporary copy", "failed", str(exc)))
+            else:
+                fields.append(FieldResult(str(path), "Temporary copy", "changed", "Removed the approved temporary copy."))
+    return ApplyResult(tuple(fields), (), ())

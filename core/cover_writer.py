@@ -9,7 +9,7 @@ from threading import Lock
 
 from core.cover_engine import PreparedCover, cover_paths, validate_prepared_cover
 from core.flac_input import FileState, LocalRelease, directory_identity, file_state
-from core.tag_writer import COVER_STAGING_SUFFIX, STAGING_PREFIX, ApplyResult, FieldResult, embed_front_cover
+from core.tag_writer import COVER_STAGING_SUFFIX, ApplyResult, FieldResult, embed_front_cover, staging_prefix
 
 
 _FOLDER_LOCK = Lock()
@@ -88,7 +88,7 @@ def _apply_folder(review: ArtworkReview) -> ApplyResult:
             raise PermissionError("Write permission is required for the release folder and reviewed covers.")
         if shutil.disk_usage(review.local.root).free < len(review.cover.data):
             raise OSError("Insufficient space to stage the folder cover.")
-        fd, name = mkstemp(prefix=STAGING_PREFIX, suffix=COVER_STAGING_SUFFIX, dir=review.local.root)
+        fd, name = mkstemp(prefix=staging_prefix(), suffix=COVER_STAGING_SUFFIX, dir=review.local.root)
         staged = Path(name)
         try:
             with os.fdopen(fd, "wb") as stream:
