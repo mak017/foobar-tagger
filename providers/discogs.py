@@ -1,6 +1,7 @@
 """Search Discogs release editions and load their metadata and artwork."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date
 import json
 import os
 import re
@@ -9,6 +10,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib import request
 
 from core.artist_credits import ArtistCredit
+from core.matching import compare_release_content
 from core.release_classification import ReleaseTypeEvidence
 from core.rules_engine import DateSource, Edition, EditionTrack, GenreSource, ReleaseDates
 from core.track_positions import DISC_MEDIA
@@ -63,6 +65,8 @@ class DiscogsError(ValueError):
 
 
 MAX_IMAGE_DOWNLOAD = 32 * 1024 * 1024
+_LATER_OR_NONRETAIL = frozenset({"reissue", "repress", "promo", "advance", "test pressing",
+                                "unofficial release", "partially unofficial"})
 
 
 def _image_url(url: str) -> bool:
@@ -258,11 +262,20 @@ def load_release(url: str) -> DiscogsRelease:
         raise DiscogsError("Use an HTTPS Discogs release URL for a specific edition.")
 
     release_id = release_match[1]
+    data = _get_release(release_id)
+    release = _parse_release(data, release_id)
+    return replace(release, edition=replace(release.edition, dates=_resolve_dates(data.get("master_id"), release.edition)))
+
+
+def _get_release(release_id: str) -> dict[str, object]:
     req = _request(f"https://api.discogs.com/releases/{release_id}", "application/json")
     data = _json(req, f"release {release_id}")
-
     if not isinstance(data, dict) or type(data.get("id")) is not int or str(data["id"]) != release_id:
         raise DiscogsError(f"Discogs did not return the requested edition {release_id}.")
+    return data
+
+
+def _parse_release(data: dict[str, object], release_id: str) -> DiscogsRelease:
     title = data.get("title")
     if not isinstance(title, str) or not title.strip():
         raise DiscogsError(f"Discogs did not provide a title for release {release_id}.")
@@ -290,12 +303,10 @@ def load_release(url: str) -> DiscogsRelease:
     if isinstance(styles, list) and styles and all(isinstance(style, str) and style.strip() for style in styles):
         genre_sources = (GenreSource("discogs", release_id, tuple(styles)),)
 
-    released, year = data.get("released"), data.get("year")
-    date_source = None
-    if isinstance(released, str) and re.fullmatch(r"[1-9][0-9]{3}(?:-(?!00)[0-9]{2}-(?!00)[0-9]{2})?", released):
-        date_source = DateSource("discogs", release_id, released)
-    elif type(year) is int and 1000 <= year <= 9999:
-        date_source = DateSource("discogs", release_id, str(year))
+    released, year = _date_value(data.get("released")), data.get("year")
+    if released is None and type(year) is int and 1000 <= year <= 9999:
+        released = str(year)
+    date_source = DateSource("discogs", release_id, released) if released else None
 
     edition = Edition(
         "discogs", release_id, media, tuple(tracks), complete and bool(tracks),
@@ -305,6 +316,104 @@ def load_release(url: str) -> DiscogsRelease:
         disc_count=_disc_count(formats, media),
     )
     return DiscogsRelease(title, edition, _release_images(data.get("images")))
+
+
+def _date_value(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if re.fullmatch(r"[1-9][0-9]{3}(?:-(?:0[0-9]|1[0-2])(?:-00)?)?", value):
+        return value[:4]
+    if re.fullmatch(r"[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}", value):
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError:
+            pass
+    return None
+
+
+def _clearly_earlier(first: str, second: str) -> bool:
+    return first[:4] < second[:4] or (len(first) == len(second) == 10 and first < second)
+
+
+def _original_candidate(master_id: int) -> tuple[str, str] | None:
+    url = f"https://api.discogs.com/masters/{master_id}/versions?sort=released&sort_order=asc&per_page=100"
+    data = _json(_request(url, "application/json"), f"versions of master {master_id}")
+    if not isinstance(data, dict) or not isinstance(data.get("versions"), list):
+        return None
+    pagination = data.get("pagination")
+    if not isinstance(pagination, dict) or pagination.get("page") != 1:
+        return None
+    pages = pagination.get("pages")
+    if type(pages) is not int or pages < 1:
+        return None
+
+    candidates: dict[str, str] = {}
+    years: set[str] = set()
+    for version in data["versions"]:
+        if not isinstance(version, dict):
+            return None
+        release_id, released = version.get("id"), _date_value(version.get("released"))
+        if type(release_id) is not int or release_id < 1:
+            return None
+        if released is None:
+            continue
+        years.add(released[:4])
+        format_labels = {label.strip() for label in _text(version.get("format")).casefold().split(",")}
+        if not format_labels & _LATER_OR_NONRETAIL:
+            key = str(release_id)
+            if key in candidates and candidates[key] != released:
+                return None
+            candidates[key] = released
+    if not candidates:
+        return None
+    candidate = min(candidates, key=candidates.__getitem__)
+    released = candidates[candidate]
+    if pages > 1 and max(years) <= released[:4]:
+        return None
+    if any(other != candidate and not _clearly_earlier(released, other_date)
+           for other, other_date in candidates.items()):
+        return None
+    return candidate, released
+
+
+def _resolve_dates(master_id: object, edition: Edition) -> ReleaseDates:
+    dates = edition.dates or ReleaseDates()
+    if type(master_id) is not int or master_id < 1:
+        return replace(dates, relationship_reason="Discogs did not link this edition to a master for comparison. Confirm the applicable date.")
+    try:
+        candidate = _original_candidate(master_id)
+        if candidate is None:
+            return replace(dates, relationship_reason="Discogs does not identify one earliest dated original edition. Confirm the applicable date.")
+        original_id, listed_date = candidate
+        original = edition
+        if original_id != edition.release_id:
+            data = _get_release(original_id)
+            if type(data.get("master_id")) is not int or data["master_id"] != master_id:
+                return replace(dates, relationship_reason="Discogs does not confirm the comparison edition belongs to the same master.")
+            original = _parse_release(data, original_id).edition
+    except DiscogsError as exc:
+        return replace(dates, relationship_reason=f"Original release lookup was unavailable. {exc}")
+
+    formats = original.release_type_evidence
+    if formats and any(label.casefold() in _LATER_OR_NONRETAIL
+                       for descriptions in (formats.edition_descriptions, *formats.formats) for label in descriptions):
+        return replace(dates, relationship_reason="Discogs format descriptions do not support the earliest listing as an original edition.")
+    original_date = original.dates.edition_date if original.dates else None
+    if original_date is None or _clearly_earlier(original_date.value, listed_date) or _clearly_earlier(listed_date, original_date.value):
+        return replace(dates, relationship_reason="Discogs has missing or conflicting dates for the earliest listed edition.")
+    if original_id == edition.release_id:
+        return replace(dates, content_relationship="original",
+                       relationship_reason="Use the date of the earliest supported Discogs edition.")
+    if dates.edition_date and not _clearly_earlier(original_date.value, dates.edition_date.value):
+        return replace(dates, original_date=original_date,
+                       relationship_reason="Discogs dates do not establish that the comparison edition came first.")
+    relationship = compare_release_content(edition, original)
+    reason = {
+        "unchanged": f"Use the date of Discogs release {original_id}. The complete tracklists support the same recordings and order.",
+        "changed": f"Use this edition's date. Its tracklist differs from the original Discogs release {original_id}.",
+        "unknown": f"Discogs release {original_id} has insufficient or conflicting recording evidence. Confirm the applicable date.",
+    }[relationship]
+    return ReleaseDates(dates.edition_date, original_date, relationship, reason)
 
 
 def _media_type(formats: object) -> str:

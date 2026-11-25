@@ -8,6 +8,7 @@ import re
 from typing import Literal
 from unicodedata import normalize
 
+from core.artist_credits import render_artist_credit
 from core.rules_engine import Edition, EditionTrack, LocalFile, ReleaseContext
 from core.track_positions import DISC_MEDIA, parse_disc_position
 
@@ -16,6 +17,7 @@ MAX_DURATION_DIFFERENCE = 5
 VINYL_MEDIA = frozenset({"Vinyl", "LP"})
 _BRACKETED = re.compile(r"^(.+?)\s*(?:\(([^()]+)\)|\[([^\[\]]+)\])$")
 _VERSION_WORD = re.compile(r"\b(?:mix|remix|edit|version|dub|rework|instrumental|vocal|remaster(?:ed)?|live|acoustic|vip)\b")
+_REMASTER_VERSION = re.compile(r"(?:[0-9]{4} )?remaster(?:ed)?(?: [0-9]{4})?")
 _FILE_PREFIX = re.compile(r"^(\d{1,2}[-.]\d{1,3}|[a-z]{1,2}\d{0,3}|\d{1,3})([ ._\-]+)(\S.*)$", re.IGNORECASE)
 _PUNCTUATION = str.maketrans({"‘": "'", "’": "'", "–": "-", "—": "-", "‐": "-"})
 
@@ -56,6 +58,49 @@ def _title_parts(value: str) -> tuple[str, str]:
     if separator and _VERSION_WORD.search(version):
         return base, version
     return title, ""
+
+
+def _content_titles(edition: Edition) -> tuple[tuple[str, str], ...]:
+    titles = (_title_parts(track.title) for track in edition.tracks)
+    return tuple(_title_parts(title) if _REMASTER_VERSION.fullmatch(version) else (title, version)
+                 for title, version in titles)
+
+
+def _recording_artists(edition: Edition) -> tuple[tuple[int | None, ...] | None, ...]:
+    inherit = all(track.artist_credits is None for track in edition.tracks)
+    return tuple(
+        credit.identities if (credit := render_artist_credit(
+            edition.artist_credits if inherit else track.artist_credits, edition.provider,
+        )) and None not in credit.identities else None
+        for track in edition.tracks
+    )
+
+
+def compare_release_content(selected: Edition, original: Edition) -> Literal["unchanged", "changed", "unknown"]:
+    """Compare two complete listings without using positions, formats, or dates as recording evidence."""
+    if not selected.tracklist_complete or not original.tracklist_complete or not selected.tracks or not original.tracks:
+        return "unknown"
+    selected_titles, original_titles = _content_titles(selected), _content_titles(original)
+    if any(not title for title, _ in (*selected_titles, *original_titles)):
+        return "unknown"
+    if len(selected_titles) != len(original_titles):
+        return "changed"
+    if selected_titles != original_titles:
+        if Counter(selected_titles) == Counter(original_titles):
+            return "unknown"
+        if any(title != old_title or (version and old_version and version != old_version)
+               for (title, version), (old_title, old_version) in zip(selected_titles, original_titles)):
+            return "changed"
+        return "unknown"
+
+    artists, original_artists = _recording_artists(selected), _recording_artists(original)
+    if None in artists or artists != original_artists:
+        return "unknown"
+    for track, original_track in zip(selected.tracks, original.tracks):
+        difference = _duration_difference(track.duration_seconds, original_track.duration_seconds)
+        if difference is None or difference > MAX_DURATION_DIFFERENCE:
+            return "unknown"
+    return "unchanged"
 
 
 def _filename_parts(file_id: str) -> tuple[str, str]:

@@ -30,8 +30,8 @@ vocabulary validation and selection consistency. Genre changes are returned in
 linked approval groups; later application orchestration must enforce them.
 
 `MetadataProposal.evaluated_rules` identifies the rule families evaluated for the
-given inputs. Reissue content comparison is pending. The artwork
-window previews covers and applies separately approved folder or embedded artwork.
+given inputs. The artwork window previews covers and applies separately approved
+folder or embedded artwork.
 
 ## Review and apply metadata (PowerShell)
 
@@ -78,7 +78,14 @@ Use **Edit type** to select any of the 14 values in the plan or return to editio
 evidence. The review shows the reason and source before approval.
 [Discogs format guidelines](https://support.discogs.com/hc/en-us/articles/360005006654-Database-Guidelines-6-Format) [Release classification screenshot](docs/release-classification.jpg)
 
-Use **Edit date** and **Edit styles** to update the release-wide values. The
+Release dates use the earliest supported Discogs edition when the two complete
+tracklists agree on titles, versions, order, artist identities, and durations
+within five seconds. An added or substituted track or a different explicit mix
+uses the selected edition's date. The date proposal shows the source release.
+Use **Edit date** to resolve uncertain cases, including overlapping dates for
+early pressings, a missing master, and incomplete recording evidence.
+
+Use **Edit styles** to update the release-wide genre value. The
 existing and proposed values appear side by side, with source evidence and
 unresolved issues below the table. CD and DVD track numbers restart on each
 disc, and the total includes every track on that disc. Multi-disc editions
@@ -153,8 +160,8 @@ $releaseUrl = Read-Host 'Paste the URL of the Discogs edition'
 ```
 
 Repeat `--accept-style` for each Discogs style accepted for this preview. Dates
-stay unresolved until the relationship between edition and original release
-content is established. The CLI preview does not modify any files.
+stay unresolved when Discogs cannot establish the comparison. The CLI preview
+does not modify any files.
 
 ## FLAC writer
 
@@ -305,8 +312,12 @@ for conversion rather than treated as already compliant.
 
 `Edition.dates=None` means dates have not been inspected and skips their rules.
 `ReleaseDates()` explicitly represents inspected but unresolved date evidence.
-Supply normalized `DateSource(provider, release_id, value)` facts and an evidenced
-`content_relationship`:
+The Discogs loader looks for one earliest dated eligible release on the first
+page of the master versions, sorted by release date. It skips entries marked as
+promos, represses, reissues, test pressings, advances, or unofficial releases.
+When another page may contain an equally early candidate, the result stays
+unresolved. Callers can also supply normalized `DateSource(provider, release_id,
+value)` facts and an evidenced `content_relationship`.
 
 | Relationship | Date chosen |
 | --- | --- |
@@ -315,8 +326,8 @@ Supply normalized `DateSource(provider, release_id, value)` facts and an evidenc
 | `unchanged` | Supported original date: packaging, media changes, or remastering alone do not reset it. Missing original evidence stays unresolved. |
 | `unknown` | Unresolved, unless supported edition/original dates agree exactly. Never infer content identity from an earliest master year. |
 
-Date facts accept a valid four-digit year or complete calendar date. Partial
-`YYYY-MM`, zero dates, impossible dates, and malformed values stay unresolved.
+Date facts accept a valid four-digit year or complete calendar date. The Discogs
+loader retains only the year from approximate dates such as `1998-02-00`.
 If a source establishes only a year, represent that fact as `YYYY`; never insert
 a guessed day/month. `%DATE%` receives the year and `%RELEASE DATE%` receives only
 a complete date. The same values apply to every release track.

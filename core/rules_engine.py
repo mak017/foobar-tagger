@@ -72,6 +72,7 @@ class ReleaseDates:
     edition_date: DateSource | None = None
     original_date: DateSource | None = None
     content_relationship: str = "unknown"
+    relationship_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -468,10 +469,13 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
             date_source = dates.original_date
             reason = "Use the supported original release date for unchanged release content."
         elif dates.content_relationship not in ("original", "changed"):
-            date_problem = ("DATE_RELATIONSHIP_REQUIRED", "Establish whether release content is original, unchanged, or changed.")
+            date_problem = ("DATE_RELATIONSHIP_REQUIRED", dates.relationship_reason or
+                            "Establish whether release content is original, unchanged, or changed.")
             if dates.content_relationship == "unknown" and date_source and dates.original_date and date_source.value == dates.original_date.value:
                 date_problem = None
                 reason = "Edition and supported original dates agree; no content relationship assumption is needed."
+        if dates.content_relationship in ("original", "unchanged", "changed") and dates.relationship_reason:
+            reason = dates.relationship_reason
         if context.manual_date is not None:
             date_source = DateSource("manual", edition.release_id, context.manual_date.value)
             date_problem = None
