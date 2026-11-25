@@ -1,9 +1,9 @@
 """Pure metadata proposals for implemented normalization rules."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from types import MappingProxyType
-from typing import Mapping
+from typing import Literal, Mapping
 import re
 
 from core.artist_credits import ArtistCredit, RenderedCredit, credit_source, credits_differ, is_various, render_artist_credit
@@ -115,6 +115,21 @@ class ManualDate:
 
 
 @dataclass(frozen=True)
+class ManualField:
+    action: Literal["set", "delete", "skip"]
+    values: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", tuple(self.values))
+
+
+EDITABLE_TEXT_FIELDS = frozenset({"%ARTIST%", "%TITLE%", "%ALBUM%", "%ALBUM ARTIST%", "%LABEL%",
+                                  "%CATALOGNUMBER%", "%RELEASECOUNTRY%", "%MEDIATYPE%", "%DISCSUBTITLE%", "%BPM%"})
+MULTIVALUE_FIELDS = frozenset({"%ARTIST%", "%ALBUM ARTIST%", "%LABEL%", "%CATALOGNUMBER%"})
+_REQUIRED_CREDIT_FIELDS = frozenset({"%ARTIST%", "%TITLE%", "%ALBUM%"})
+
+
+@dataclass(frozen=True)
 class ReleaseContext:
     files: tuple[LocalFile, ...]
     selected_file_ids: frozenset[str]
@@ -124,11 +139,17 @@ class ReleaseContext:
     manual_genres: tuple[str, ...] | None = None
     manual_date: ManualDate | None = None
     manual_release_type: str | None = None
+    manual_fields: Mapping[tuple[str, str], ManualField] = field(default_factory=dict)
+    manual_vinyl_positions: Mapping[str, str] = field(default_factory=dict)
+    genre_action: Literal["delete", "skip"] | None = None
+    skip_dates: bool = False
 
     def __post_init__(self):
         object.__setattr__(self, "files", tuple(self.files))
         object.__setattr__(self, "selected_file_ids", frozenset(self.selected_file_ids))
         object.__setattr__(self, "track_mapping", MappingProxyType(dict(self.track_mapping)))
+        object.__setattr__(self, "manual_fields", MappingProxyType(dict(self.manual_fields)))
+        object.__setattr__(self, "manual_vinyl_positions", MappingProxyType(dict(self.manual_vinyl_positions)))
         if self.manual_genres is not None:
             object.__setattr__(self, "manual_genres", tuple(self.manual_genres))
 
@@ -521,6 +542,61 @@ def _propose_disc_web_numbering(
                 issues.append(ReviewIssue("DISC_SUBTITLE_REQUIRED", reason, (file.file_id,), ("%DISCSUBTITLE%",), ("skip",)))
 
 
+def _manual_field_decision(context: ReleaseContext, derived: FieldDecision, edit: ManualField) -> FieldDecision:
+    values = tuple(dict.fromkeys(value.strip() for value in edit.values))
+    evidence = Evidence("manual", context.edition.release_id, edit.values or None)
+    existing, tag = derived.existing_values, derived.field
+    if edit.action == "skip":
+        return replace(derived, proposed_values=existing, state="KEEP", evidence=evidence,
+                       reason="Keep the existing value by request.")
+    if derived.file_id not in context.track_mapping:
+        return replace(derived, proposed_values=None, state="UNRESOLVED", evidence=evidence,
+                       reason="Confirm the track mapping before applying a manual change.")
+    if edit.action == "delete" and tag not in _REQUIRED_CREDIT_FIELDS:
+        return replace(derived, proposed_values=None, state="KEEP" if existing is None else "DELETE", evidence=evidence,
+                       reason="Remove the field by request.")
+    reason = "Enter a nonempty value for this field."
+    valid = bool(values) and all(value and not any(ord(char) < 32 for char in value) for value in values)
+    valid = valid and (tag in MULTIVALUE_FIELDS or len(values) == 1)
+    if valid and tag == "%BPM%":
+        bpm = normalize_bpm(values[0])
+        valid = bpm is not None
+        values = (bpm,) if bpm is not None else ()
+        reason = "Enter BPM as a positive number, such as 128 or 128.5."
+    elif valid and tag == "%MEDIATYPE%":
+        valid = values == (context.edition.media_type,)
+        reason = "Media type must agree with the selected edition. Choose a different edition to correct its format."
+    elif valid and tag == "%DISCSUBTITLE%":
+        valid = context.edition.media_type in DISC_MEDIA and context.edition.tracklist_complete and _disc_layout(context.edition) is not None
+        reason = "A manual subtitle requires a verified CD/DVD disc."
+    if edit.action != "set" or not valid:
+        return replace(derived, proposed_values=None, state="UNRESOLVED", evidence=evidence, reason=reason)
+    return replace(derived, proposed_values=values, state="KEEP" if values == existing else "SET", evidence=evidence,
+                   reason="Use the manually reviewed value.")
+
+
+def _apply_manual_fields(context: ReleaseContext, decisions: list[FieldDecision], issues: list[ReviewIssue]) -> None:
+    for index, decision in enumerate(decisions):
+        if decision.field not in EDITABLE_TEXT_FIELDS:
+            continue
+        edit = context.manual_fields.get((decision.file_id, decision.field))
+        if edit is None:
+            continue
+        updated = _manual_field_decision(context, decision, edit)
+        decisions[index] = updated
+        for issue_index in range(len(issues) - 1, -1, -1):
+            issue = issues[issue_index]
+            if issue.file_ids == (decision.file_id,) and decision.field in issue.fields:
+                remaining = tuple(field for field in issue.fields if field != decision.field)
+                if remaining:
+                    issues[issue_index] = replace(issue, fields=remaining)
+                else:
+                    issues.pop(issue_index)
+        if updated.state == "UNRESOLVED":
+            issues.append(ReviewIssue("MANUAL_FIELD_INVALID", updated.reason, (decision.file_id,),
+                                      (decision.field,), ("edit_field", "skip")))
+
+
 def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> MetadataProposal:
     """Return review decisions without reading or writing files."""
     edition = context.edition
@@ -562,7 +638,16 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
     if edition.release_type_evidence is not None or context.manual_release_type is not None:
         evaluated_rules.append("release_type")
         _propose_release_type(context, decisions, issues)
-    if edition.dates is not None or context.manual_date is not None:
+    if context.skip_dates:
+        evaluated_rules.append("release_dates")
+        for file in context.files:
+            if file.file_id in context.selected_file_ids:
+                for tag in ("%DATE%", "%RELEASE DATE%"):
+                    existing = file.tags.get(tag)
+                    decisions.append(FieldDecision(file.file_id, tag, existing, existing, "KEEP",
+                                                   Evidence("manual", edition.release_id, None),
+                                                   "Keep the existing release dates by request."))
+    elif edition.dates is not None or context.manual_date is not None:
         evaluated_rules.append("release_dates")
         dates = edition.dates or ReleaseDates()
         date_source = dates.edition_date
@@ -643,7 +728,15 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
                 "%DATE%", tuple(dict.fromkeys(change[0] for change in date_changes)),
                 year_target, date_changes,
             ))
-    if edition.genre_sources is not None or context.manual_genres is not None:
+    if context.genre_action == "skip":
+        evaluated_rules.append("genres")
+        for file in context.files:
+            if file.file_id in context.selected_file_ids:
+                existing = file.tags.get("%GENRE%")
+                decisions.append(FieldDecision(file.file_id, "%GENRE%", existing, existing, "KEEP",
+                                               Evidence("manual", edition.release_id, None),
+                                               "Keep the existing release genres by request."))
+    elif edition.details is not None or edition.genre_sources is not None or context.manual_genres is not None or context.genre_action == "delete":
         evaluated_rules.append("genres")
         problem: tuple[str, str] | None = None
         sources = edition.genre_sources or ()
@@ -672,7 +765,11 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
             problem = ("GENRE_SOURCE_CONFLICT", f"Select between conflicting genre sources: {preferred_sources!r}")
         if problem is None and any(style not in policy.accepted_styles for style in styles):
             problem = ("GENRE_STYLE_NOT_ACCEPTED", "Choose styles from the configured accepted vocabulary.")
-        value = (", ".join(dict.fromkeys(styles)),) if problem is None else None
+        deleting = context.genre_action == "delete"
+        if deleting:
+            problem = None
+            reason = "Remove the genre field across the release by request."
+        value = (", ".join(dict.fromkeys(styles)),) if problem is None and not deleting else None
         conflicts = tuple(
             f.file_id for f in context.files
             if f.file_id not in context.selected_file_ids and f.tags.get("%GENRE%") != value
@@ -700,17 +797,21 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
                 existing = file.tags.get("%GENRE%")
                 decisions.append(FieldDecision(
                     file.file_id, "%GENRE%", existing, value,
-                    "UNRESOLVED" if problem else "KEEP" if existing == value else "SET",
+                    "UNRESOLVED" if problem else "KEEP" if existing == value else "DELETE" if deleting else "SET",
+                    Evidence("manual", edition.release_id, None) if deleting else
                     Evidence(genre_source.provider, genre_source.release_id, genre_source.styles) if genre_source else
                     Evidence(edition.provider, edition.release_id, None),
                     problem[1] if problem else reason,
                 ))
-        changed = tuple(d.file_id for d in decisions if d.field == "%GENRE%" and d.state == "SET")
-        if changed and value is not None:
-            approval_groups.append(ApprovalGroup("%GENRE%", changed, value))
+        changed = tuple(d.file_id for d in decisions if d.field == "%GENRE%" and d.state in ("SET", "DELETE"))
+        if changed:
+            linked = tuple((file_id, "%GENRE%", None) for file_id in changed) if deleting else ()
+            approval_groups.append(ApprovalGroup("%GENRE%", changed, value or (), linked))
     if edition.media_type in DISC_MEDIA or edition.media_type == "WEB":
         evaluated_rules.append("web_numbering" if edition.media_type == "WEB" else "disc_numbering")
         _propose_disc_web_numbering(context, decisions, issues, approval_groups)
+    if context.manual_fields:
+        _apply_manual_fields(context, decisions, issues)
     if edition.media_type not in ("Vinyl", "LP"):
         return MetadataProposal(tuple(decisions), tuple(issues), tuple(evaluated_rules), tuple(approval_groups))
     evaluated_rules.append("vinyl_numbering")
@@ -731,9 +832,13 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
                 ))
             continue
         number, track = tracks[context.track_mapping[file.file_id]]
-        position_match = re.fullmatch(r"([A-Z]+)([1-9][0-9]*)?", track.position)
+        manual = context.manual_vinyl_positions.get(file.file_id)
+        position = track.position if manual is None else manual.strip().upper()
+        position_match = re.fullmatch(r"([A-Z]+)([1-9][0-9]*)?", position)
         side, within_side = position_match.groups() if position_match else (None, None)
         evidence = Evidence(edition.provider, edition.release_id, track.position)
+        side_fields = ("%VINYLSIDE%", "%VINYLTRACKNUMBER%")
+        side_evidence = evidence if manual is None else Evidence("manual", edition.release_id, manual)
         targets = (
             ("%TRACKNUMBER%", (str(number),)),
             ("%TOTALTRACKS%", (str(len(edition.tracks)),)),
@@ -742,12 +847,14 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
             ("%DISCNUMBER%", None),
             ("%TOTALDISCS%", None),
         )
+        paired_changes: dict[str, list[tuple[str, str, tuple[str, ...] | None]]] = {"%VINYLSIDE%": [], "%DISCNUMBER%": []}
         for field, value in targets:
             existing = file.tags.get(field)
-            if not position_match and field in ("%VINYLSIDE%", "%VINYLTRACKNUMBER%"):
-                reason = "The source position does not establish a vinyl side or within-side number."
+            if not position_match and field in side_fields:
+                reason = ("Enter a vinyl side or position such as A or B2." if manual is not None else
+                          "The source position does not establish a vinyl side or within-side number.")
                 decisions.append(FieldDecision(
-                    file.file_id, field, existing, None, "UNRESOLVED", evidence, reason,
+                    file.file_id, field, existing, None, "UNRESOLVED", side_evidence, reason,
                 ))
                 continue
             if not edition.tracklist_complete and field in ("%TRACKNUMBER%", "%TOTALTRACKS%"):
@@ -756,11 +863,18 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
                     file.file_id, field, existing, None, "UNRESOLVED", evidence, reason,
                 ))
                 continue
+            from_side = field in side_fields
+            if existing != value and (from_side or field in _DISC_FIELDS):
+                paired_changes["%VINYLSIDE%" if from_side else "%DISCNUMBER%"].append((file.file_id, field, value))
             decisions.append(FieldDecision(
                 file.file_id, field, existing, value,
-                "KEEP" if existing == value else "DELETE" if value is None else "SET", evidence,
+                "KEEP" if existing == value else "DELETE" if value is None else "SET", side_evidence if from_side else evidence,
+                "Use the manually confirmed vinyl position." if from_side and manual is not None else
                 "Vinyl uses continuous release numbering, separate side positions, and no disc tags.",
             ))
+        for field, changes in paired_changes.items():
+            if len(changes) == 2:
+                approval_groups.append(ApprovalGroup(field, (file.file_id,), (), tuple(changes)))
         if not edition.tracklist_complete:
             issues.append(ReviewIssue(
                 "INCOMPLETE_TRACKLIST", "Retrieve or confirm the complete edition tracklist.",

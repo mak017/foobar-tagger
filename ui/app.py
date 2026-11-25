@@ -7,13 +7,16 @@ from dataclasses import replace
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from core.clue_parser import parse_folder_clues
 from core.flac_input import LocalRelease, inspect_release
 from core.matching import MAX_DURATION_DIFFERENCE, TrackEvidence, TrackSuggestion, suggest_track_mappings
 from core.release_classification import VALID_RELEASE_TYPES
-from core.rules_engine import ManualDate, MetadataPolicy, ReleaseContext, propose_metadata
+from core.rules_engine import (
+    EDITABLE_TEXT_FIELDS, MULTIVALUE_FIELDS, FieldDecision, ManualDate, ManualField, MetadataPolicy,
+    ReleaseContext, propose_metadata,
+)
 from core.tag_writer import ApplyResult, apply_metadata, find_staged_files
 from providers.discogs import DiscogsRelease, ReleaseCandidate, load_release
 from ui.artwork_panel import ArtworkWindow
@@ -54,6 +57,10 @@ class ReviewWindow:
         self.manual_date: ManualDate | None = None
         self.manual_styles: tuple[str, ...] | None = None
         self.manual_release_type: str | None = None
+        self.manual_fields: dict[tuple[str, str], ManualField] = {}
+        self.manual_vinyl_positions: dict[str, str] = {}
+        self.genre_action: Literal["delete", "skip"] | None = None
+        self.skip_dates = False
         self.policy = MetadataPolicy(accepted_styles=accepted_styles)
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.busy = False
@@ -177,9 +184,19 @@ class ReviewWindow:
         self.diff.grid(row=1, column=0, sticky="nsew")
         self.diff.bind("<<ApprovalsChanged>>", lambda _event: self._controls())
         self.diff.tree.bind("<Double-1>", self._edit_field)
+        self.diff.tree.bind("<Return>", lambda _event: self._edit_selected())
+        self.diff.tree.bind("<<TreeviewSelect>>", lambda _event: self._controls(), add="+")
+        row_actions = ttk.Frame(review, style="Panel.TFrame")
+        row_actions.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        self.edit_button = ttk.Button(row_actions, text="Edit selected field…", command=self._edit_selected)
+        self.edit_button.pack(side="left")
+        self.show_matching = tk.BooleanVar(master=root)
+        self.show_matching_button = ttk.Checkbutton(row_actions, text="Show matching fields", variable=self.show_matching,
+                                                    command=lambda: self.diff.set_show_matching(self.show_matching.get()))
+        self.show_matching_button.pack(side="left", padx=(8, 0))
         detail = tk.Text(review, height=4, wrap="word", font=("Segoe UI", 10), background=INPUT,
                          foreground=TEXT, borderwidth=0, highlightthickness=0, padx=8, pady=6, takefocus=False)
-        detail.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        detail.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         self.diff.detail.trace_add("write", lambda *_args: self._fill_text(detail, self.diff.detail.get()))
         self._fill_text(detail, self.diff.detail.get())
 
@@ -217,6 +234,7 @@ class ReviewWindow:
         grouped = local and self.confirmed.get()
         editing = grouped and self.release is not None
         approval = self.diff.approval
+        row = self._selected_decision()
         approved = approval.selected() if approval is not None else ()
         self.approval_text.set(f"{len(approved)} approved" if approval is not None else "")
         for widget, enabled in (
@@ -227,6 +245,8 @@ class ReviewWindow:
             (self.toggle_file_button, local and bool(self.file_tree.selection())),
             (self.artwork_button, local), (self.styles_button, editing), (self.date_button, editing),
             (self.type_button, editing),
+            (self.edit_button, editing and row is not None and self._editable(row)),
+            (self.show_matching_button, editing),
             (self.approve_button, editing and bool(approval and approval.decisions)),
             (self.clear_button, editing and bool(approved)), (self.apply_button, editing and bool(approved)),
         ):
@@ -293,7 +313,7 @@ class ReviewWindow:
             self.needs_refresh = False
             self.release = None
             self.mapping.clear()
-            self.manual_date = self.manual_styles = self.manual_release_type = None
+            self._reset_edits()
             self.confirmed.set(False)
             self.status.set("Confirm which files belong to this release.")
             staged = find_staged_files(local)
@@ -385,6 +405,7 @@ class ReviewWindow:
         self.local = replace(self.local, selected_file_ids=self.local.selected_file_ids.symmetric_difference({file_id}))
         if file_id not in self.local.selected_file_ids:
             self.mapping.pop(file_id, None)
+            self._forget_track_edits(file_id)
         self._show_files()
         self._rebuild()
 
@@ -462,6 +483,7 @@ class ReviewWindow:
         if (self.busy or self._artwork_writing() or self.local is None or not self.confirmed.get()
                 or file_id not in self.local.selected_file_ids):
             return
+        previous_track = self.mapping.get(file_id)
         if track_id is None:
             self.mapping.pop(file_id, None)
         else:
@@ -470,6 +492,8 @@ class ReviewWindow:
                 self._sync_mapping()
                 return
             self.mapping[file_id] = track_id
+        if track_id != previous_track:
+            self._forget_track_edits(file_id)
         self.status.set("Mapping updated. Review the new proposal before applying.")
         self._show_files()
         self._rebuild()
@@ -478,7 +502,7 @@ class ReviewWindow:
         if self.release is not None:
             self.release = None
             self.mapping.clear()
-            self.manual_date = self.manual_styles = self.manual_release_type = None
+            self._reset_edits()
             self._show_files()
         self._rebuild()
 
@@ -508,7 +532,7 @@ class ReviewWindow:
             return
         self.release = None
         self.mapping.clear()
-        self.manual_date = self.manual_styles = self.manual_release_type = None
+        self._reset_edits()
         self._show_files()
         self._rebuild()
 
@@ -542,7 +566,9 @@ class ReviewWindow:
             self.edition_text.set("  |  ".join(cues))
             context = ReleaseContext(local.files, local.selected_file_ids, edition, self.mapping, membership_complete=True,
                                      manual_genres=self.manual_styles, manual_date=self.manual_date,
-                                     manual_release_type=self.manual_release_type)
+                                     manual_release_type=self.manual_release_type, manual_fields=self.manual_fields,
+                                     manual_vinyl_positions=self.manual_vinyl_positions, genre_action=self.genre_action,
+                                     skip_dates=self.skip_dates)
             try:
                 self.diff.show(propose_metadata(context, self.policy))
             except ValueError as exc:
@@ -553,42 +579,113 @@ class ReviewWindow:
     def _edit_field(self, event: tk.Event) -> None:
         if self.diff.tree.identify_column(event.x) == "#1":
             return
-        decision = self.diff.rows.get(self.diff.tree.identify_row(event.y))
-        if decision is not None:
-            if decision.field in ("%DATE%", "%RELEASE DATE%"):
-                self._edit_date()
-            elif decision.field == "%GENRE%":
-                self._edit_styles()
-            elif decision.field == "%RELEASETYPE%":
-                self._edit_release_type()
+        self._edit_selected(self.diff.rows.get(self.diff.tree.identify_row(event.y)))
+
+    def _reset_edits(self) -> None:
+        self.manual_date = self.manual_styles = self.manual_release_type = self.genre_action = None
+        self.skip_dates = False
+        self.manual_fields.clear()
+        self.manual_vinyl_positions.clear()
+
+    def _forget_track_edits(self, file_id: str) -> None:
+        self.manual_fields = {key: edit for key, edit in self.manual_fields.items() if key[0] != file_id}
+        self.manual_vinyl_positions.pop(file_id, None)
+
+    def _selected_decision(self) -> FieldDecision | None:
+        selection = self.diff.tree.selection()
+        return self.diff.rows.get(selection[0]) if selection else None
+
+    def _editable(self, decision: FieldDecision) -> bool:
+        if decision.field in ("%DATE%", "%RELEASE DATE%", "%GENRE%", "%RELEASETYPE%"):
+            return True
+        return decision.file_id in self.mapping and (
+            decision.field in EDITABLE_TEXT_FIELDS or decision.field in ("%VINYLSIDE%", "%VINYLTRACKNUMBER%")
+        )
+
+    def _edit_selected(self, decision: FieldDecision | None = None) -> None:
+        decision = decision or self._selected_decision()
+        if (decision is None or not self._editable(decision) or self.busy or self._artwork_writing()
+                or self.needs_refresh or not self.confirmed.get() or self.release is None):
+            return
+        if decision.field in ("%DATE%", "%RELEASE DATE%"):
+            self._edit_date()
+        elif decision.field == "%GENRE%":
+            self._edit_styles()
+        elif decision.field == "%RELEASETYPE%":
+            self._edit_release_type()
+        elif decision.field in ("%VINYLSIDE%", "%VINYLTRACKNUMBER%"):
+            result = self._edit("Vinyl position", (("Side or position, such as A or B2 (blank uses Discogs)",
+                                                    self.manual_vinyl_positions.get(decision.file_id, "")),))
+            if result is not None:
+                value = result[0]
+                if value:
+                    self.manual_vinyl_positions[decision.file_id] = value
+                else:
+                    self.manual_vinyl_positions.pop(decision.file_id, None)
+                self._rebuild()
+        else:
+            self._edit_track_field(decision)
+
+    def _edit_track_field(self, decision: FieldDecision) -> None:
+        key = decision.file_id, decision.field
+        edit = self.manual_fields.get(key)
+        actions: dict[str, Literal["set", "delete", "skip"]] = {
+            "Set reviewed value": "set", "Keep existing value": "skip",
+        }
+        if decision.field not in ("%ARTIST%", "%TITLE%", "%ALBUM%"):
+            actions["Remove field"] = "delete"
+        automatic = "Use edition evidence"
+        current = next((label for label, action in actions.items() if edit is not None and edit.action == action),
+                       "Set reviewed value")
+        values = edit.values if edit is not None else decision.proposed_values or decision.existing_values or ()
+        label = "Value (separate multiple values with ' | ')" if decision.field in MULTIVALUE_FIELDS else "Value"
+        result = self._edit(decision.field.strip("%"), ((decision.file_id, current), (label, " | ".join(values))),
+                            choices=(*actions, automatic))
+        if result is not None:
+            mode, value = result
+            if mode == automatic:
+                self.manual_fields.pop(key, None)
+            else:
+                action = actions[mode]
+                values = tuple(value.split(" | ")) if decision.field in MULTIVALUE_FIELDS else (value,)
+                self.manual_fields[key] = ManualField(action, values if action == "set" else ())
+            self.status.set("Field updated. Review the new proposal before applying.")
+            self._rebuild()
 
     def _edit_date(self) -> None:
-        if self.busy or self.release is None or not self.confirmed.get():
+        if self.busy or self._artwork_writing() or self.release is None or not self.confirmed.get():
             return
         date = self.manual_date
-        result = self._edit("Release date", (("Release date or year (blank uses provider evidence)", date.value if date else ""),),
-                            ("Explicitly clear the existing exact date", bool(date and date.clear_exact_date)))
+        automatic, change, clear, keep = ("Use edition evidence", "Set date or year", "Set year and remove exact date",
+                                           "Keep existing dates")
+        mode = keep if self.skip_dates else automatic if date is None else clear if date.clear_exact_date else change
+        result = self._edit("Release date", (("Action for the whole release", mode), ("Release date or year", date.value if date else "")),
+                            choices=(automatic, change, clear, keep))
         if result is not None:
-            (value,), clear = result
-            if clear and not value:
-                self.status.set("Enter a year to request deletion of the exact date.")
+            mode, value = result
+            if mode in (change, clear) and not value:
+                self.status.set("Enter a release date or year.")
                 return
-            self.manual_date = ManualDate(value, clear) if value else None
+            self.skip_dates = mode == keep
+            self.manual_date = ManualDate(value, mode == clear) if mode in (change, clear) else None
             self.status.set("Date updated. Review the new proposal before applying.")
             self._rebuild()
 
     def _edit_styles(self) -> None:
-        if self.busy or self.release is None or not self.confirmed.get():
+        if self.busy or self._artwork_writing() or self.release is None or not self.confirmed.get():
             return
         styles = tuple(dict.fromkeys(style for source in self.release.edition.genre_sources or () for style in source.styles))
-        result = self._edit("Release styles", (
+        automatic, change, delete, keep = "Use edition evidence", "Set selected styles", "Remove genres", "Keep existing genres"
+        mode = keep if self.genre_action == "skip" else delete if self.genre_action == "delete" else change if self.manual_styles else automatic
+        result = self._edit("Release styles", (("Action for the whole release", mode),
             (f"Discogs styles: {', '.join(styles) or 'None supplied'}\nAccepted vocabulary (comma separated)", ", ".join(sorted(self.policy.accepted_styles))),
-            ("Selected styles (blank uses Discogs styles)", ", ".join(self.manual_styles or ())),
-        ))
+            ("Selected styles (comma separated)", ", ".join(self.manual_styles or ())),
+        ), choices=(automatic, change, delete, keep))
         if result is not None:
-            (vocabulary, chosen), _ = result
+            mode, vocabulary, chosen = result
             self.policy = replace(self.policy, accepted_styles=frozenset(style.strip() for style in vocabulary.split(",") if style.strip()))
-            self.manual_styles = tuple(style.strip() for style in chosen.split(",") if style.strip()) or None
+            self.manual_styles = tuple(style.strip() for style in chosen.split(",") if style.strip()) if mode == change else None
+            self.genre_action = "delete" if mode == delete else "skip" if mode == keep else None
             self.status.set("Styles updated. Review the new proposal before applying.")
             self._rebuild()
 
@@ -600,13 +697,13 @@ class ReviewWindow:
         result = self._edit("Release type", (("Type for the selected edition", current),),
                             choices=(automatic, *VALID_RELEASE_TYPES))
         if result is not None:
-            (value,), _ = result
+            (value,) = result
             self.manual_release_type = None if value == automatic else value
             self.status.set("Release type updated. Review the new proposal before applying.")
             self._rebuild()
 
-    def _edit(self, title: str, fields: tuple[tuple[str, str], ...], checkbox: tuple[str, bool] | None = None,
-              *, choices: tuple[str, ...] | None = None) -> tuple[tuple[str, ...], bool] | None:
+    def _edit(self, title: str, fields: tuple[tuple[str, str], ...],
+              *, choices: tuple[str, ...] | None = None) -> tuple[str, ...] | None:
         dialog = tk.Toplevel(self.root, background=BACKGROUND)
         dialog.title(title)
         dialog.transient(self.root)
@@ -614,9 +711,9 @@ class ReviewWindow:
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
         entries: list[ttk.Entry] = []
-        for label, value in fields:
+        for index, (label, value) in enumerate(fields):
             ttk.Label(body, text=label, wraplength=420).pack(anchor="w")
-            if choices is not None:
+            if index == 0 and choices is not None:
                 entry = ttk.Combobox(body, state="readonly", values=choices, width=38)
                 entry.set(value)
             else:
@@ -624,16 +721,13 @@ class ReviewWindow:
                 entry.insert(0, value)
             entry.pack(fill="x", pady=(4, 10))
             entries.append(entry)
-        checked = tk.BooleanVar(master=dialog, value=checkbox[1] if checkbox else False)
-        if checkbox:
-            ttk.Checkbutton(body, text=checkbox[0], variable=checked).pack(anchor="w")
         actions = ttk.Frame(body)
         actions.pack(fill="x", pady=(10, 0))
         result = None
 
         def accept() -> None:
             nonlocal result
-            result = (tuple(entry.get().strip() for entry in entries), checked.get())
+            result = tuple(entry.get().strip() for entry in entries)
             dialog.destroy()
 
         ttk.Button(actions, text="Update proposal", command=accept).pack(side="right")

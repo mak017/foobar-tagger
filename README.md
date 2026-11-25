@@ -91,7 +91,9 @@ uses the selected edition's date. The date proposal shows the source release.
 Use **Edit date** to resolve uncertain cases, including overlapping dates for
 early pressings, a missing master, and incomplete recording evidence.
 
-Use **Edit styles** to update the release-wide genre value. The
+Use **Edit styles** to update or remove the release-wide genre value, or keep
+the existing values. **Edit date** also offers keeping the existing dates or
+setting a confirmed year while explicitly clearing the exact date. The
 existing and proposed values appear side by side, with source evidence and
 unresolved issues below the table. CD and DVD track numbers restart on each
 disc, and the total includes every track on that disc. Multi-disc editions
@@ -108,6 +110,13 @@ preserves any existing value.
 Use the checkboxes or Space to approve individual changes. Linked date and
 genre changes are selected together. When both disc tags change on a CD, DVD,
 or WEB file, the two changes are approved together. Editing the inputs clears approvals.
+Select a row and choose **Edit selected field**, press Enter, or double-click
+the row to review a correction. **Show matching fields** also lets you edit
+values that already match. You can enter a known BPM, keep an existing value,
+or explicitly remove an optional field. To resolve an uncertain vinyl side,
+edit either vinyl position field and enter a position such as `A` or `B2`.
+Changing the mapping clears that file's edits.
+[Field editor screenshot](docs/edit-bpm.jpg)
 **Apply approved** asks for confirmation, displays each field's outcome, and
 refreshes the comparison. [Review window screenshot](docs/review-window.jpg)
 
@@ -310,8 +319,8 @@ unselected sibling has a different target genre. Expand selection or skip genres
 in that case; recompute and review the proposal after changing inputs.
 
 `ReleaseContext.manual_genres=("Techno",)` supplies a release-wide manual choice;
-`None` means no override. An empty tuple does not request deletion. Clearing or
-skipping genres through explicit manual commands is not implemented yet.
+`None` means no override. Use `genre_action="delete"` to request removal from
+the entire release or `genre_action="skip"` to keep the existing tags.
 
 The accepted vocabulary defaults to empty, deliberately admitting no style until
 configured. Add individual Discogs-style names explicitly. Vocabulary names and

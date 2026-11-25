@@ -50,6 +50,7 @@ class DiffTable(ttk.Frame):
         self.approval: ReviewApproval | None = None
         self.rows: dict[str, FieldDecision] = {}
         self.locked = False
+        self.show_matching = False
         self.detail = tk.StringVar(master=self, value="Select a field to see its source and reason.")
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -77,17 +78,28 @@ class DiffTable(ttk.Frame):
     def show(self, proposal: MetadataProposal | None) -> None:
         self.proposal = proposal
         self.approval = ReviewApproval(proposal) if proposal is not None else None
+        self._render()
+
+    def set_show_matching(self, show: bool) -> None:
+        self.show_matching = show
+        self._render()
+        self._refresh_checks()
+
+    def _render(self) -> None:
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
+        proposal = self.proposal
         if proposal is not None:
             for decision in proposal.decisions:
-                if decision.state == "KEEP":
+                if decision.state == "KEEP" and not self.show_matching and decision.evidence.provider != "manual":
                     continue
                 action, tag, mark = "Unresolved", "unresolved", ""
                 if decision.state == "SET":
                     action, tag, mark = ("Add" if decision.existing_values is None else "Replace"), "", "☐"
                 elif decision.state == "DELETE":
                     action, tag, mark = "Delete", "delete", "☐"
+                elif decision.state == "KEEP":
+                    action, tag = "Keep", ""
                 item = self.tree.insert("", "end", values=(
                     mark, decision.file_id, decision.field.strip("%"),
                     _display(decision.existing_values), _display(decision.proposed_values), action,
