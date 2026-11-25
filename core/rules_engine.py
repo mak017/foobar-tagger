@@ -76,6 +76,14 @@ class ReleaseDates:
 
 
 @dataclass(frozen=True)
+class EditionDetails:
+    labels: tuple[str, ...] = ()
+    catalog_numbers: tuple[str, ...] = ()
+    country: str = ""
+    formats: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Edition:
     provider: str
     release_id: str
@@ -88,6 +96,7 @@ class Edition:
     artist_credits: tuple[ArtistCredit, ...] | None = None
     release_type_evidence: ReleaseTypeEvidence | None = None
     disc_count: int | None = None
+    details: EditionDetails | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "tracks", tuple(self.tracks))
@@ -273,6 +282,48 @@ def _propose_credited_fields(
                                            Evidence(edition.provider, edition.release_id, value.source), value.reason))
 
 
+def _propose_edition_details(context: ReleaseContext, decisions: list[FieldDecision], issues: list[ReviewIssue]) -> None:
+    edition = context.edition
+    details = edition.details
+    if details is None:
+        return
+    labels = tuple(dict.fromkeys(label for label in details.labels
+                                if not re.fullmatch(r"Not On Label(?: \(.+\))?", label, flags=re.IGNORECASE)))
+    catalog_numbers = tuple(dict.fromkeys(number for number in details.catalog_numbers if number.casefold() != "none"))
+    country = (details.country,) if details.country and details.country.casefold() not in ("unknown", "none") else ()
+    media = (edition.media_type,) if edition.media_type in ("WEB", "CD", "Vinyl", "LP", "DVD") else ()
+    fields = (
+        ("%LABEL%", labels, details.labels or None, "label"),
+        ("%CATALOGNUMBER%", catalog_numbers, details.catalog_numbers or None, "catalog number"),
+        ("%RELEASECOUNTRY%", country, details.country or None, "release country"),
+        ("%MEDIATYPE%", media, details.formats or None, "media type"),
+    )
+    for file in context.files:
+        if file.file_id not in context.selected_file_ids:
+            continue
+        mapped = file.file_id in context.track_mapping
+        for field, values, source, name in fields:
+            existing = file.tags.get(field)
+            reason = f"Use the selected edition's {name}."
+            if not mapped:
+                reason = "Confirm a provider track mapping before changing this file."
+            elif not values:
+                reason = f"Discogs does not establish a {name} for the selected edition."
+            if mapped and values:
+                state = "KEEP" if values == existing else "SET"
+            elif mapped and field in ("%LABEL%", "%CATALOGNUMBER%") and source is not None and existing is None:
+                state = "KEEP"
+                reason = f"Discogs explicitly lists no {name} for this edition."
+            else:
+                state = "UNRESOLVED"
+                code, options = ("EDITION_DETAIL_REQUIRED", ("review_edition", "skip")) if mapped else (
+                    "MAPPING_REQUIRED", ("manual_mapping", "skip"),
+                )
+                issues.append(ReviewIssue(code, reason, (file.file_id,), (field,), options))
+            decisions.append(FieldDecision(file.file_id, field, existing, values if mapped and values else None, state,
+                                           Evidence(edition.provider, edition.release_id, source), reason))
+
+
 def _propose_release_type(
     context: ReleaseContext, decisions: list[FieldDecision], issues: list[ReviewIssue],
 ) -> None:
@@ -456,6 +507,9 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
             or any(track.title or track.artist_credits is not None for track in edition.tracks)):
         evaluated_rules.append("credited_metadata")
         _propose_credited_fields(context, decisions, issues)
+    if edition.details is not None:
+        evaluated_rules.append("edition_details")
+        _propose_edition_details(context, decisions, issues)
     if edition.release_type_evidence is not None or context.manual_release_type is not None:
         evaluated_rules.append("release_type")
         _propose_release_type(context, decisions, issues)

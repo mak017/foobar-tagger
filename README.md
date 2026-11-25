@@ -78,6 +78,12 @@ Use **Edit type** to select any of the 14 values in the plan or return to editio
 evidence. The review shows the reason and source before approval.
 [Discogs format guidelines](https://support.discogs.com/hc/en-us/articles/360005006654-Database-Guidelines-6-Format) [Release classification screenshot](docs/release-classification.jpg)
 
+The matched edition also supplies label, catalog number, release country, and
+media type. Joint labels and distinct catalog numbers are preserved in source
+order. Discogs placeholders for absent labels or catalog numbers are never
+written as tags. Missing details leave existing values in place.
+[Discogs label and catalog guidelines](https://support.discogs.com/hc/en-us/articles/360005006614-Database-Guidelines-4-Label-Catalog-Number)
+
 Release dates use the earliest supported Discogs edition when the two complete
 tracklists agree on titles, versions, order, artist identities, and durations
 within five seconds. An added or substituted track or a different explicit mix
@@ -175,8 +181,9 @@ flag release-wide inconsistencies after partial application.
 
 The current writer uses FLAC Vorbis comments `ARTIST`, `TITLE`, `ALBUM`,
 `ALBUMARTIST`, `RELEASETYPE`, `DATE`, `RELEASE DATE`, `GENRE`, `TRACKNUMBER`, `TOTALTRACKS`,
-`DISCNUMBER`, `TOTALDISCS`, `VINYLSIDE`, and `VINYLTRACKNUMBER` for the
-implemented rules. It recognizes `ALBUM ARTIST`, `TRACKTOTAL`, and `DISCTOTAL`
+`DISCNUMBER`, `TOTALDISCS`, `VINYLSIDE`, `VINYLTRACKNUMBER`, `ORGANIZATION`,
+`CATALOGNUMBER`, `RELEASECOUNTRY`, and `MEDIATYPE` for the implemented rules.
+It recognizes `ALBUM ARTIST`, `TRACKTOTAL`, `DISCTOTAL`, and `LABEL`
 as aliases and removes them when an approved change replaces or
 deletes their logical field. The mappings have been round-tripped with Mutagen
 on disposable FLACs. Checking them in foobar2000 remains pending.

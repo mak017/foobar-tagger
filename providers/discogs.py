@@ -12,7 +12,7 @@ from urllib import request
 from core.artist_credits import ArtistCredit
 from core.matching import compare_release_content
 from core.release_classification import ReleaseTypeEvidence
-from core.rules_engine import DateSource, Edition, EditionTrack, GenreSource, ReleaseDates
+from core.rules_engine import DateSource, Edition, EditionDetails, EditionTrack, GenreSource, ReleaseDates
 from core.track_positions import DISC_MEDIA
 
 
@@ -251,6 +251,23 @@ def _release_type_evidence(formats: object, credits: object) -> ReleaseTypeEvide
     return ReleaseTypeEvidence(tuple(descriptions), mixing_credit, tuple(edition_descriptions))
 
 
+def _edition_details(data: dict[str, object]) -> EditionDetails:
+    labels = data.get("labels")
+    names: tuple[str, ...] = ()
+    numbers: tuple[str, ...] = ()
+    if isinstance(labels, list) and all(isinstance(item, dict) for item in labels):
+        if all(_text(item.get("name")) for item in labels):
+            names = tuple(_text(item.get("name")) for item in labels)
+        if all(_text(item.get("catno")) for item in labels):
+            numbers = tuple(_text(item.get("catno")) for item in labels)
+    formats = data.get("formats")
+    source_formats = tuple(
+        ", ".join((name, *_text_list(row.get("descriptions"))))
+        for row in formats if isinstance(row, dict) and (name := _text(row.get("name")))
+    ) if isinstance(formats, list) else ()
+    return EditionDetails(names, numbers, _text(data.get("country")), source_formats)
+
+
 def load_release(url: str) -> DiscogsRelease:
     parsed = urlsplit(url.strip())
     release_match = None
@@ -314,6 +331,7 @@ def _parse_release(data: dict[str, object], release_id: str) -> DiscogsRelease:
         release_title=title, artist_credits=_artist_credits(data.get("artists")),
         release_type_evidence=_release_type_evidence(formats, data.get("extraartists")),
         disc_count=_disc_count(formats, media),
+        details=_edition_details(data),
     )
     return DiscogsRelease(title, edition, _release_images(data.get("images")))
 
