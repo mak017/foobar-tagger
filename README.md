@@ -207,6 +207,48 @@ the listed paths and explicitly approve removal of temporary copies from exited
 writers. Active, unidentifiable, or changed copies stay in place. The terminal
 preview remains read-only. [Staging cleanup screenshot](docs/staging-cleanup.jpg)
 
+## Test Milestone 1 with a FLAC release
+
+Copy one complete release into a scratch folder. Keep its numbered disc
+subfolders if it has them. Use a release with at least two tracks and have the
+Discogs URL for your exact edition handy. From the repository root, use the
+existing Python 3.13 environment to preview the copy and then open the review.
+
+```powershell
+$releaseCopy = 'C:\Music\Test Copies\Your copied release'
+.\.venv\Scripts\python main.py $releaseCopy
+.\.venv\Scripts\python main.py --review $releaseCopy
+```
+
+1. **Check the match.** Confirm the release grouping. Paste the Discogs release
+   URL and choose **Load edition**, or use **Find editions**. Compare the catalog
+   number, country, format, and tracklist with your copy. Confirm each mapping
+   using a suggestion or the track dropdown.
+2. **Test the selection boundary.** Record one sibling's SHA-256 with
+   `Get-FileHash -Algorithm SHA256 -LiteralPath 'C:\path\to\sibling.flac'`.
+   In the review, exclude that file and approve one independent change on a
+   mapped file, such as Catalog Number. If everything already matches, enter
+   a verified BPM that is missing from a mapped track.
+   Choose **Apply approved** and confirm. The sibling's hash must stay the same.
+   A date or genre change that would disagree with that sibling should appear
+   as unresolved.
+3. **Test the whole release.** Include the sibling again, reconfirm grouping
+   after the refresh, and restore any cleared mapping. Review and approve the
+   date, styles, and numbering you expect. For a CD/DVD, compare totals per disc.
+   For WEB or vinyl, compare totals across the release. Unknown dates or styles
+   may need **Edit date** or **Edit styles** before they can be approved.
+4. **Test artwork separately.** Choose **Artwork** and review the edition image.
+   A qualifying image shows at least 1000 × 1000 pixels and fewer than 5,000,000
+   bytes. Try **Save folder cover** on its own, then optionally try embedding with
+   only one FLAC selected. Check the reported output path and selected files.
+   If no image qualifies, complete the metadata check independently.
+5. **Read the result in foobar2000.** Open the copies after applying and
+   right-click a track to see **Properties**. Compare Title, Album, Date, Genre,
+   track numbers, and the changed edition tags with the approved diff. Look for
+   the label under `ORGANIZATION` if your view shows raw comment names. Check
+   the cover and confirm that no staging files remain after a successful write.
+   [foobar2000 Properties help](https://www.foobar2000.org/FAQ)
+
 ## Development (PowerShell)
 
 Developed and tested with Python 3.13.7. The FLAC reader uses Mutagen and artwork
