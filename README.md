@@ -99,6 +99,11 @@ also receive disc numbers and the full disc count. WEB and vinyl track numbers
 and totals use the full release. The review proposes removing existing disc tags
 from single-disc CD/DVD, WEB, and vinyl files. Incomplete tracklists and ambiguous
 CD/DVD positions leave the affected numbering fields unresolved.
+An explicit heading such as `Disc 1: Mixed` supplies a disc subtitle when it
+precedes the first track of that verified disc. Discogs does not supply a
+structured tempo for matched tracks, so the BPM row stays unresolved and
+preserves any existing value.
+[Discogs tracklisting guidelines](https://support.discogs.com/hc/en-us/articles/360005055373-Database-Guidelines-12-Tracklisting)
 
 Use the checkboxes or Space to approve individual changes. Linked date and
 genre changes are selected together. When both disc tags change on a CD, DVD,
@@ -182,7 +187,7 @@ flag release-wide inconsistencies after partial application.
 The current writer uses FLAC Vorbis comments `ARTIST`, `TITLE`, `ALBUM`,
 `ALBUMARTIST`, `RELEASETYPE`, `DATE`, `RELEASE DATE`, `GENRE`, `TRACKNUMBER`, `TOTALTRACKS`,
 `DISCNUMBER`, `TOTALDISCS`, `VINYLSIDE`, `VINYLTRACKNUMBER`, `ORGANIZATION`,
-`CATALOGNUMBER`, `RELEASECOUNTRY`, and `MEDIATYPE` for the implemented rules.
+`CATALOGNUMBER`, `RELEASECOUNTRY`, `MEDIATYPE`, `DISCSUBTITLE`, and `BPM` for the implemented rules.
 It recognizes `ALBUM ARTIST`, `TRACKTOTAL`, `DISCTOTAL`, and `LABEL`
 as aliases and removes them when an approved change replaces or
 deletes their logical field. The mappings have been round-tripped with Mutagen

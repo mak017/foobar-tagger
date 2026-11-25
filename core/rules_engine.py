@@ -38,6 +38,7 @@ class EditionTrack:
     title: str = ""
     duration_seconds: int | None = None
     artist_credits: tuple[ArtistCredit, ...] | None = None
+    bpm: str | None = None
 
     def __post_init__(self):
         if self.artist_credits is not None:
@@ -81,6 +82,7 @@ class EditionDetails:
     catalog_numbers: tuple[str, ...] = ()
     country: str = ""
     formats: tuple[str, ...] = ()
+    disc_subtitles: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -378,6 +380,36 @@ def _valid_release_date(value: object) -> bool:
     return True
 
 
+def normalize_bpm(value: str) -> str | None:
+    value = value.strip()
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value) or not value.strip("0."):
+        return None
+    whole, _, fraction = value.partition(".")
+    whole, fraction = whole.lstrip("0") or "0", fraction.rstrip("0")
+    return f"{whole}.{fraction}" if fraction else whole
+
+
+def _propose_bpm(context: ReleaseContext, decisions: list[FieldDecision], issues: list[ReviewIssue]) -> None:
+    edition = context.edition
+    tracks = {track.track_id: track for track in edition.tracks}
+    for file in context.files:
+        if file.file_id not in context.selected_file_ids:
+            continue
+        track = tracks.get(context.track_mapping.get(file.file_id, ""))
+        source = track.bpm if track else None
+        value = normalize_bpm(source) if source is not None else None
+        existing = file.tags.get("%BPM%")
+        proposed = (value,) if value is not None else None
+        reason = "Use the tempo supplied for the matched recording."
+        if proposed is None:
+            reason = ("The provider does not establish a valid BPM for the matched recording." if track else
+                      "Confirm a provider track mapping before setting BPM.")
+            issues.append(ReviewIssue("BPM_EVIDENCE_REQUIRED", reason, (file.file_id,), ("%BPM%",), ("skip",)))
+        decisions.append(FieldDecision(file.file_id, "%BPM%", existing, proposed,
+                                       "UNRESOLVED" if proposed is None else "KEEP" if existing == proposed else "SET",
+                                       Evidence(edition.provider, edition.release_id, source), reason))
+
+
 _TRACK_FIELDS = ("%TRACKNUMBER%", "%TOTALTRACKS%")
 _DISC_FIELDS = ("%DISCNUMBER%", "%TOTALDISCS%")
 
@@ -473,6 +505,20 @@ def _propose_disc_web_numbering(
             decisions.append(FieldDecision(file.file_id, field, existing, values, state, evidence, note))
         if len(disc_changes) == 2:
             approval_groups.append(ApprovalGroup("%DISCNUMBER%", (file.file_id,), (), tuple(disc_changes)))
+        if not web and edition.details is not None:
+            disc_number = layout[0][mapped][0] if layout is not None and mapped is not None else None
+            headings = tuple(dict.fromkeys(title for disc, title in edition.details.disc_subtitles if disc == disc_number))
+            existing = file.tags.get("%DISCSUBTITLE%")
+            if len(headings) == 1:
+                decisions.append(FieldDecision(file.file_id, "%DISCSUBTITLE%", existing, headings,
+                                               "KEEP" if existing == headings else "SET",
+                                               Evidence(edition.provider, edition.release_id, headings[0]),
+                                               "Use the explicit heading for this verified disc."))
+            else:
+                reason = "The selected edition does not establish one subtitle for this disc."
+                decisions.append(FieldDecision(file.file_id, "%DISCSUBTITLE%", existing, None, "UNRESOLVED",
+                                               Evidence(edition.provider, edition.release_id, headings or None), reason))
+                issues.append(ReviewIssue("DISC_SUBTITLE_REQUIRED", reason, (file.file_id,), ("%DISCSUBTITLE%",), ("skip",)))
 
 
 def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> MetadataProposal:
@@ -510,6 +556,9 @@ def propose_metadata(context: ReleaseContext, policy: MetadataPolicy) -> Metadat
     if edition.details is not None:
         evaluated_rules.append("edition_details")
         _propose_edition_details(context, decisions, issues)
+    if edition.details is not None or any(track.bpm is not None for track in edition.tracks):
+        evaluated_rules.append("track_bpm")
+        _propose_bpm(context, decisions, issues)
     if edition.release_type_evidence is not None or context.manual_release_type is not None:
         evaluated_rules.append("release_type")
         _propose_release_type(context, decisions, issues)

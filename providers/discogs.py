@@ -13,7 +13,7 @@ from core.artist_credits import ArtistCredit
 from core.matching import compare_release_content
 from core.release_classification import ReleaseTypeEvidence
 from core.rules_engine import DateSource, Edition, EditionDetails, EditionTrack, GenreSource, ReleaseDates
-from core.track_positions import DISC_MEDIA
+from core.track_positions import DISC_MEDIA, parse_disc_position
 
 
 @dataclass(frozen=True)
@@ -251,7 +251,7 @@ def _release_type_evidence(formats: object, credits: object) -> ReleaseTypeEvide
     return ReleaseTypeEvidence(tuple(descriptions), mixing_credit, tuple(edition_descriptions))
 
 
-def _edition_details(data: dict[str, object]) -> EditionDetails:
+def _edition_details(data: dict[str, object], disc_subtitles: tuple[tuple[int, str], ...]) -> EditionDetails:
     labels = data.get("labels")
     names: tuple[str, ...] = ()
     numbers: tuple[str, ...] = ()
@@ -265,7 +265,14 @@ def _edition_details(data: dict[str, object]) -> EditionDetails:
         ", ".join((name, *_text_list(row.get("descriptions"))))
         for row in formats if isinstance(row, dict) and (name := _text(row.get("name")))
     ) if isinstance(formats, list) else ()
-    return EditionDetails(names, numbers, _text(data.get("country")), source_formats)
+    return EditionDetails(names, numbers, _text(data.get("country")), source_formats, disc_subtitles)
+
+
+def _disc_heading(title: str, media: str) -> tuple[int, str] | None:
+    match = re.fullmatch(r"(CD|DVD|Disc|Disk)\s*([0-9]{1,4})\s*[:\-–—]\s*(\S.*)", title, flags=re.IGNORECASE)
+    if match is None or (match[1].upper() in DISC_MEDIA and match[1].upper() != media):
+        return None
+    return int(match[2]), title
 
 
 def load_release(url: str) -> DiscogsRelease:
@@ -297,24 +304,32 @@ def _parse_release(data: dict[str, object], release_id: str) -> DiscogsRelease:
     if not isinstance(title, str) or not title.strip():
         raise DiscogsError(f"Discogs did not provide a title for release {release_id}.")
 
+    formats = data.get("formats")
+    media = _media_type(formats)
     tracklist = data.get("tracklist")
     complete = isinstance(tracklist, list) and bool(tracklist)
     tracks: list[EditionTrack] = []
+    pending_headings: list[tuple[int, str]] = []
+    disc_subtitles: list[tuple[int, str]] = []
     for index, entry in enumerate(tracklist if isinstance(tracklist, list) else (), 1):
         if isinstance(entry, dict) and entry.get("type_") == "heading":
+            if media in DISC_MEDIA and (heading := _disc_heading(_text(entry.get("title")), media)):
+                pending_headings.append(heading)
             continue
         if not isinstance(entry, dict) or entry.get("type_") != "track" or entry.get("sub_tracks"):
             complete = False
+            pending_headings.clear()
             continue
         position, track_title = entry.get("position"), entry.get("title")
+        if pending_headings and (parts := parse_disc_position(_text(position), media)) is not None and parts[1] == 1:
+            disc_subtitles.extend(heading for heading in pending_headings if heading[0] == (parts[0] or 1))
+        pending_headings.clear()
         tracks.append(EditionTrack(
             str(index), position.strip() if isinstance(position, str) else "",
             track_title if isinstance(track_title, str) else "", _duration(entry.get("duration")),
             artist_credits=_artist_credits(entry.get("artists")),
         ))
 
-    formats = data.get("formats")
-    media = _media_type(formats)
     styles = data.get("styles")
     genre_sources = ()
     if isinstance(styles, list) and styles and all(isinstance(style, str) and style.strip() for style in styles):
@@ -331,7 +346,7 @@ def _parse_release(data: dict[str, object], release_id: str) -> DiscogsRelease:
         release_title=title, artist_credits=_artist_credits(data.get("artists")),
         release_type_evidence=_release_type_evidence(formats, data.get("extraartists")),
         disc_count=_disc_count(formats, media),
-        details=_edition_details(data),
+        details=_edition_details(data, tuple(disc_subtitles)),
     )
     return DiscogsRelease(title, edition, _release_images(data.get("images")))
 
